@@ -1,0 +1,9 @@
+import gi
+gi.require_version("Gtk", "4.0")
+gi.require_version("Adw", "1")
+from gi.repository import Gtk, Adw
+try:
+    d = Adw.MessageDialog(heading="H", body="B")
+    print("YES")
+except Exception as e:
+    print("NO:", e)

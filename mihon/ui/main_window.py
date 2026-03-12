@@ -5,10 +5,10 @@ Uses Adw.NavigationSplitView for responsive layout.
 import gi
 gi.require_version("Gtk", "4.0")
 gi.require_version("Adw", "1")
-from gi.repository import Gtk, Adw, GLib
+from gi.repository import Gtk, Adw, GLib, GObject
 from ..core.models import Manga, Chapter
 from .library import LibraryView
-from .browse import BrowseView
+from .browse import BrowseView, SourceCatalogView
 from .manga_detail import MangaDetailView
 from .reader import ReaderView
 
@@ -25,173 +25,138 @@ class MainWindow(Adw.ApplicationWindow):
         self._build_ui()
 
     def _build_ui(self):
-        # Root: outer box
-        outer = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=0)
+        # The root is a NavigationView to handle pushing/popping pages
+        self._nav_view = Adw.NavigationView()
 
-        # ── Sidebar ────────────────────────────────────────────────────────
-        sidebar = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=0)
-        sidebar.set_size_request(220, -1)
-        sidebar.add_css_class("sidebar")
+        # ── Main Page (Tabs) ───────────────────────────────────────────────
+        self._tab_stack = Adw.ViewStack()
+        self._tab_stack.connect("notify::visible-child-name", self._on_tab_changed)
 
-        # App header in sidebar
-        sidebar_header = Adw.HeaderBar()
-        sidebar_header.set_show_end_title_buttons(False)
-        sidebar_header.set_show_start_title_buttons(False)
-        sidebar_title = Adw.WindowTitle(title="Mihon")
-        sidebar_header.set_title_widget(sidebar_title)
-        sidebar.append(sidebar_header)
+        # Setup ToolbarView with ViewSwitcherBar at the bottom
+        toolbar_view = Adw.ToolbarView()
+        toolbar_view.set_content(self._tab_stack)
 
-        # Nav list
-        self._nav_list = Gtk.ListBox()
-        self._nav_list.set_selection_mode(Gtk.SelectionMode.SINGLE)
-        self._nav_list.add_css_class("navigation-sidebar")
-        self._nav_list.connect("row-selected", self._on_nav_selected)
+        # Top HeaderBar with ViewSwitcherTitle
+        header = Adw.HeaderBar()
+        self._switcher_title = Adw.ViewSwitcherTitle()
+        self._switcher_title.set_title("Mihon")
+        self._switcher_title.set_stack(self._tab_stack)
+        header.set_title_widget(self._switcher_title)
+        toolbar_view.add_top_bar(header)
 
-        nav_items = [
-            ("library-symbolic", "Library"),
-            ("find-location-symbolic", "Browse"),
-            ("clock-symbolic", "History"),
-            ("arrow-down-symbolic", "Downloads"),
-            ("preferences-system-symbolic", "Settings"),
-        ]
+        # Bottom ViewSwitcherBar for mobile/narrow widths
+        switcher_bar = Adw.ViewSwitcherBar()
+        switcher_bar.set_stack(self._tab_stack)
+        toolbar_view.add_bottom_bar(switcher_bar)
 
-        self._nav_rows = []
-        for icon_name, label in nav_items:
-            row = self._make_nav_row(icon_name, label)
-            self._nav_list.append(row)
-            self._nav_rows.append(row)
+        # Bind the title widget to the bottom bar reveal state (Standard Adwaita pattern)
+        # When the title widget is squeezed, the bottom bar is revealed.
+        self._switcher_title.bind_property(
+            "title-visible",
+            switcher_bar,
+            "reveal",
+            GObject.BindingFlags.SYNC_CREATE
+        )
 
-        sidebar.append(self._nav_list)
-        outer.append(sidebar)
+        self._main_nav_page = Adw.NavigationPage.new(toolbar_view, "Mihon")
+        self._main_nav_page.set_tag("main")
+        self._nav_view.add(self._main_nav_page)
 
-        # Separator
-        outer.append(Gtk.Separator(orientation=Gtk.Orientation.VERTICAL))
+        # ── Tab Content ────────────────────────────────────────────────────
+        
+        # 1. Library
+        self._library_view = LibraryView(
+            on_manga_selected=self._show_manga_detail,
+            on_show_downloads=self._switch_to_downloads
+        )
+        self._tab_stack.add_titled_with_icon(self._library_view, "library", "Library", "library-symbolic")
 
-        # ── Content area ───────────────────────────────────────────────────
-        self._content_stack = Gtk.Stack()
-        self._content_stack.set_transition_type(Gtk.StackTransitionType.CROSSFADE)
-        self._content_stack.set_hexpand(True)
-        self._content_stack.set_vexpand(True)
+        # 2. Updates (Placeholder)
+        self.updates_placeholder = Gtk.Box()
+        lbl = Gtk.Label(label="Updates (Coming Soon)", hexpand=True, vexpand=True)
+        lbl.add_css_class("dim-label")
+        self.updates_placeholder.append(lbl)
+        self._tab_stack.add_titled_with_icon(self.updates_placeholder, "updates", "Updates", "view-refresh-symbolic")
 
-        # Library
-        self._library_view = LibraryView(on_manga_selected=self._show_manga_detail)
-        self._content_stack.add_named(self._library_view, "library")
-
-        # Browse
-        self._browse_view = BrowseView(on_manga_selected=self._show_manga_detail)
-        self._content_stack.add_named(self._browse_view, "browse")
-
-        # History
+        # 3. History
         self._history_view = self._build_history_view()
-        self._content_stack.add_named(self._history_view, "history")
+        self._tab_stack.add_titled_with_icon(self._history_view, "history", "History", "clock-symbolic")
 
-        # Downloads
-        self._downloads_view = self._build_downloads_view()
-        self._content_stack.add_named(self._downloads_view, "downloads")
+        # 4. Browse
+        self._browse_view = BrowseView(
+            on_source_selected=self._show_source_catalog,
+            on_manga_selected=self._show_manga_detail
+        )
+        self._tab_stack.add_titled_with_icon(self._browse_view, "browse", "Browse", "find-location-symbolic")
 
-        # Settings
-        self._settings_view = self._build_settings_view()
-        self._content_stack.add_named(self._settings_view, "settings")
+        # 5. More (Settings & Downloads)
+        self._more_view = self._build_more_view()
+        self._tab_stack.add_titled_with_icon(self._more_view, "more", "More", "more-symbolic")
 
-        # Manga detail (pushed on top)
+        # ── Push Pages ─────────────────────────────────────────────────────
         self._detail_view = MangaDetailView(
             on_read_chapter=self._show_reader,
             on_back=self._pop_to_main,
         )
-        self._content_stack.add_named(self._detail_view, "detail")
+        self._detail_page = Adw.NavigationPage.new(self._detail_view, "Detail")
+        self._detail_page.set_tag("detail")
+        self._nav_view.add(self._detail_page)
 
-        # Reader (full screen)
         self._reader_view = ReaderView(on_close=self._pop_to_detail)
-        self._content_stack.add_named(self._reader_view, "reader")
+        self._reader_page = Adw.NavigationPage.new(self._reader_view, "Reader")
+        self._reader_page.set_tag("reader")
+        self._nav_view.add(self._reader_page)
 
-        outer.append(self._content_stack)
+        self.set_content(self._nav_view)
 
-        self.set_content(outer)
-
-        # Select Library by default
-        self._nav_list.select_row(self._nav_rows[0])
-
-    def _make_nav_row(self, icon_name: str, label: str) -> Gtk.ListBoxRow:
-        row = Gtk.ListBoxRow()
-        box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=12)
-        box.set_margin_start(12)
-        box.set_margin_end(12)
-        box.set_margin_top(10)
-        box.set_margin_bottom(10)
-
-        icon = Gtk.Image.new_from_icon_name(icon_name)
-        icon.set_pixel_size(20)
-        box.append(icon)
-
-        lbl = Gtk.Label(label=label)
-        lbl.set_hexpand(True)
-        lbl.set_xalign(0)
-        box.append(lbl)
-
-        row.set_child(box)
-        row._page_name = label.lower()
-        return row
-
-    def _on_nav_selected(self, listbox, row):
-        if not row:
-            return
-        # Guard: don't let sidebar selection override detail/reader views
-        current = self._content_stack.get_visible_child_name()
-        if current in ("detail", "reader"):
-            return
-        page = row._page_name
-        self._content_stack.set_visible_child_name(page)
-        if page == "library":
+    def _on_tab_changed(self, stack, param):
+        current = stack.get_visible_child_name()
+        if current == "library":
             self._library_view.reload()
-        elif page == "history":
+        elif current == "history":
             self._refresh_history()
-        elif page == "downloads":
+        elif current == "more":
             self._refresh_downloads()
 
     # ── Navigation ─────────────────────────────────────────────────────────
 
-    def _show_manga_detail(self, manga: Manga):
-        self._navigation_stack.append(
-            self._content_stack.get_visible_child_name()
+    def _show_source_catalog(self, extension):
+        catalog = SourceCatalogView(
+            extension=extension,
+            on_manga_selected=self._show_manga_detail,
+            on_back=self._pop_to_main
         )
+        page = Adw.NavigationPage.new(catalog, extension.name)
+        self._nav_view.push(page)
+
+    def _show_manga_detail(self, manga: Manga):
         self._detail_view.load_manga(manga)
-        self._content_stack.set_visible_child_name("detail")
+        self._nav_view.push(self._detail_page)
 
     def _show_reader(self, manga: Manga, chapter):
-        self._navigation_stack.append("detail")
         self._reader_view.load_chapter(manga, chapter)
-        self._content_stack.set_visible_child_name("reader")
+        self._nav_view.push(self._reader_page)
 
     def _pop_to_main(self):
-        prev = self._navigation_stack.pop() if self._navigation_stack else "library"
-        if prev in ("library", "browse", "history", "downloads", "settings"):
-            self._content_stack.set_visible_child_name(prev)
-            # Re-sync sidebar
-            page_map = {"library": 0, "browse": 1, "history": 2, "downloads": 3, "settings": 4}
-            idx = page_map.get(prev, 0)
-            self._nav_list.select_row(self._nav_rows[idx])
-        else:
-            self._content_stack.set_visible_child_name(prev)
+        self._nav_view.pop()
 
     def _pop_to_detail(self):
-        self._content_stack.set_visible_child_name("detail")
-        if self._navigation_stack:
-            self._navigation_stack.pop()
+        self._nav_view.pop()
+
+    def _switch_to_downloads(self):
+        self._tab_stack.set_visible_child_name("more")
 
     # ── History view ───────────────────────────────────────────────────────
 
     def _build_history_view(self) -> Gtk.Box:
         box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=0)
 
-        header = Adw.HeaderBar()
-        header.set_title_widget(Adw.WindowTitle(title="History"))
-        box.append(header)
-
         scroll = Gtk.ScrolledWindow()
         scroll.set_vexpand(True)
 
         self._history_list = Gtk.ListBox()
-        self._history_list.set_selection_mode(Gtk.SelectionMode.NONE)
+        self._history_list.set_selection_mode(Gtk.SelectionMode.SINGLE)
+        self._history_list.connect("row-activated", self._on_history_row_activated)
         self._history_list.add_css_class("boxed-list")
         self._history_list.set_margin_start(16)
         self._history_list.set_margin_end(16)
@@ -225,7 +190,8 @@ class MainWindow(Adw.ApplicationWindow):
 
         for item in history:
             row = Gtk.ListBoxRow()
-            row.set_activatable(False)
+            row.set_activatable(True)
+            row._history_item = item  # attach item
             h_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=12)
             h_box.set_margin_start(12)
             h_box.set_margin_end(12)
@@ -255,30 +221,98 @@ class MainWindow(Adw.ApplicationWindow):
             date_lbl.add_css_class("dim-label")
             h_box.append(date_lbl)
 
+            del_btn = Gtk.Button(icon_name="user-trash-symbolic")
+            del_btn.add_css_class("flat")
+            del_btn.set_valign(Gtk.Align.CENTER)
+            del_btn.connect("clicked", lambda *_, hid=item["id"]: self._delete_history(hid))
+            h_box.append(del_btn)
+
             row.set_child(h_box)
             self._history_list.append(row)
 
-    # ── Downloads view ─────────────────────────────────────────────────────
+    def _on_history_row_activated(self, listbox, row):
+        item = getattr(row, "_history_item", None)
+        if item:
+            from ..core.database import get_db
+            manga = get_db().get_manga_by_id(item["manga_id"])
+            if manga:
+                self._show_manga_detail(manga)
+            listbox.unselect_row(row)
 
-    def _build_downloads_view(self) -> Gtk.Box:
+    def _delete_history(self, history_id):
+        from ..core.database import get_db
+        get_db().delete_history_item(history_id)
+        self._refresh_history()
+
+    # ── More (Settings & Downloads) view ───────────────────────────────────
+
+    def _build_more_view(self) -> Gtk.Box:
         box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=0)
-
-        header = Adw.HeaderBar()
-        header.set_title_widget(Adw.WindowTitle(title="Downloads"))
-        box.append(header)
 
         scroll = Gtk.ScrolledWindow()
         scroll.set_vexpand(True)
 
+        content = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=16)
+        content.set_margin_start(32)
+        content.set_margin_end(32)
+        content.set_margin_top(16)
+        content.set_margin_bottom(16)
+        content.set_hexpand(True)
+        content.set_halign(Gtk.Align.FILL)
+
+        # Downloads group
+        dl_group = Adw.PreferencesGroup(title="Downloads")
+        content.append(dl_group)
+
         self._downloads_list = Gtk.ListBox()
         self._downloads_list.set_selection_mode(Gtk.SelectionMode.NONE)
         self._downloads_list.add_css_class("boxed-list")
-        self._downloads_list.set_margin_start(16)
-        self._downloads_list.set_margin_end(16)
-        self._downloads_list.set_margin_top(16)
-        self._downloads_list.set_margin_bottom(16)
+        dl_group.add(self._downloads_list)
 
-        scroll.set_child(self._downloads_list)
+        dl_path_row = Adw.ActionRow(title="Download Location")
+        dl_path_row.set_subtitle(str(__import__("pathlib").Path.home() / ".local" / "share" / "mihon-linux" / "downloads"))
+        dl_group.add(dl_path_row)
+
+        # Reader settings group
+        reader_group = Adw.PreferencesGroup(title="Reader")
+        content.append(reader_group)
+
+        dir_row = Adw.ComboRow(title="Default Reading Direction")
+        dir_model = Gtk.StringList.new(["Right to Left (RTL)", "Left to Right (LTR)", "Vertical", "Webtoon"])
+        dir_row.set_model(dir_model)
+        dir_row.set_selected(0)
+        reader_group.add(dir_row)
+
+        layout_row = Adw.ComboRow(title="Page Layout")
+        layout_model = Gtk.StringList.new(["Single Page", "Double Page"])
+        layout_row.set_model(layout_model)
+        reader_group.add(layout_row)
+
+        bg_row = Adw.ComboRow(title="Reader Background")
+        bg_model = Gtk.StringList.new(["Black", "White", "Gray"])
+        bg_row.set_model(bg_model)
+        reader_group.add(bg_row)
+
+        # Library group
+        lib_group = Adw.PreferencesGroup(title="Library")
+        content.append(lib_group)
+
+        update_row = Adw.SwitchRow(title="Auto-update library", subtitle="Check for new chapters on startup")
+        lib_group.add(update_row)
+
+        unread_row = Adw.SwitchRow(title="Show unread badge", subtitle="Show unread chapter count on covers")
+        unread_row.set_active(True)
+        lib_group.add(unread_row)
+
+        # About group
+        about_group = Adw.PreferencesGroup(title="About")
+        content.append(about_group)
+
+        about_row = Adw.ActionRow(title="Mihon for Linux")
+        about_row.set_subtitle("Version 1.0.0 – Built with GTK4 + Python")
+        about_group.add(about_row)
+
+        scroll.set_child(content)
         box.append(scroll)
         return box
 
@@ -297,8 +331,8 @@ class MainWindow(Adw.ApplicationWindow):
             row = Gtk.ListBoxRow()
             lbl = Gtk.Label(label="No active downloads")
             lbl.add_css_class("dim-label")
-            lbl.set_margin_top(32)
-            lbl.set_margin_bottom(32)
+            lbl.set_margin_top(16)
+            lbl.set_margin_bottom(16)
             row.set_child(lbl)
             self._downloads_list.append(row)
             return
@@ -326,77 +360,3 @@ class MainWindow(Adw.ApplicationWindow):
 
             row.set_child(box)
             self._downloads_list.append(row)
-
-    # ── Settings view ──────────────────────────────────────────────────────
-
-    def _build_settings_view(self) -> Gtk.Box:
-        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=0)
-
-        header = Adw.HeaderBar()
-        header.set_title_widget(Adw.WindowTitle(title="Settings"))
-        box.append(header)
-
-        scroll = Gtk.ScrolledWindow()
-        scroll.set_vexpand(True)
-
-        content = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=16)
-        content.set_margin_start(32)
-        content.set_margin_end(32)
-        content.set_margin_top(16)
-        content.set_margin_bottom(16)
-        content.set_hexpand(True)
-        content.set_halign(Gtk.Align.FILL)
-
-        # Reader settings group
-        reader_group = Adw.PreferencesGroup(title="Reader")
-        content.append(reader_group)
-
-        # Default reading direction
-        dir_row = Adw.ComboRow(title="Default Reading Direction")
-        dir_model = Gtk.StringList.new(["Right to Left (RTL)", "Left to Right (LTR)", "Vertical", "Webtoon"])
-        dir_row.set_model(dir_model)
-        dir_row.set_selected(0)
-        reader_group.add(dir_row)
-
-        # Page layout
-        layout_row = Adw.ComboRow(title="Page Layout")
-        layout_model = Gtk.StringList.new(["Single Page", "Double Page"])
-        layout_row.set_model(layout_model)
-        reader_group.add(layout_row)
-
-        # Background
-        bg_row = Adw.ComboRow(title="Reader Background")
-        bg_model = Gtk.StringList.new(["Black", "White", "Gray"])
-        bg_row.set_model(bg_model)
-        reader_group.add(bg_row)
-
-        # Library group
-        lib_group = Adw.PreferencesGroup(title="Library")
-        content.append(lib_group)
-
-        update_row = Adw.SwitchRow(title="Auto-update library", subtitle="Check for new chapters on startup")
-        lib_group.add(update_row)
-
-        unread_row = Adw.SwitchRow(title="Show unread badge", subtitle="Show unread chapter count on covers")
-        unread_row.set_active(True)
-        lib_group.add(unread_row)
-
-        # Download group
-        dl_group = Adw.PreferencesGroup(title="Downloads")
-        content.append(dl_group)
-
-        dl_path_row = Adw.ActionRow(title="Download Location")
-        dl_path_row.set_subtitle(str(__import__("pathlib").Path.home() / ".local" / "share" / "mihon-linux" / "downloads"))
-        dl_group.add(dl_path_row)
-
-        # About group
-        about_group = Adw.PreferencesGroup(title="About")
-        content.append(about_group)
-
-        about_row = Adw.ActionRow(title="Mihon for Linux")
-        about_row.set_subtitle("Version 1.0.0 – Built with GTK4 + Python")
-        about_group.add(about_row)
-
-        scroll.set_child(content)
-        box.append(scroll)
-        return box

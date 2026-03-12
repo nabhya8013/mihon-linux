@@ -13,13 +13,67 @@ from .widgets import MangaGridView, EmptyState, LoadingSpinner
 
 class BrowseView(Gtk.Box):
     """
-    Browse page: shows Popular, Latest, and allows searching manga sources.
+    The main Browse tab content. Displays a list of available Sources and Extensions.
     """
 
-    def __init__(self, on_manga_selected=None):
+    def __init__(self, on_source_selected=None, on_manga_selected=None):
         super().__init__(orientation=Gtk.Orientation.VERTICAL, spacing=0)
+        self._on_source_selected = on_source_selected
+
+        self._build_ui()
+        self._load_sources()
+
+    def _build_ui(self):
+        # We can implement a tab bar here for "Sources" and "Extensions" later.
+        # For now, just a list of installed sources.
+        
+        scroll = Gtk.ScrolledWindow()
+        scroll.set_vexpand(True)
+
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=16)
+        box.set_margin_start(16)
+        box.set_margin_end(16)
+        box.set_margin_top(16)
+        box.set_margin_bottom(16)
+
+        # Sources group
+        self._sources_group = Adw.PreferencesGroup(title="Sources")
+        box.append(self._sources_group)
+
+        self._sources_list = Gtk.ListBox()
+        self._sources_list.set_selection_mode(Gtk.SelectionMode.NONE)
+        self._sources_list.add_css_class("boxed-list")
+        self._sources_group.add(self._sources_list)
+
+        scroll.set_child(box)
+        self.append(scroll)
+
+    def _load_sources(self):
+        registry = get_registry()
+        extensions = registry.get_all()
+
+        for ext in extensions:
+            row = Adw.ActionRow(title=ext.name)
+            # Add a cute icon
+            icon = Gtk.Image.new_from_icon_name("folder-publicshare-symbolic")
+            row.add_prefix(icon)
+            row.set_activatable(True)
+            row.connect("activated", lambda r, e=ext: self._on_source_selected(e) if self._on_source_selected else None)
+            self._sources_list.append(row)
+
+
+class SourceCatalogView(Gtk.Box):
+    """
+    Shows Popular, Latest, and allows searching within a specific source.
+    Pushed onto the Navigation Stack.
+    """
+
+    def __init__(self, extension, on_manga_selected=None, on_back=None):
+        super().__init__(orientation=Gtk.Orientation.VERTICAL, spacing=0)
+        self._extension = extension
         self._on_manga_selected = on_manga_selected
-        self._current_extension = None
+        self._on_back = on_back
+
         self._current_page = 1
         self._has_next = False
         self._loading_more = False
@@ -28,34 +82,30 @@ class BrowseView(Gtk.Box):
         self._manga_list = []
 
         self._build_ui()
-        self._select_default_extension()
+        self._load_page(1)
 
     def _build_ui(self):
-        # Top bar: source selector + mode tabs + search
-        top = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=0)
+        # Header bar with back button
+        header = Adw.HeaderBar()
+        header.set_show_end_title_buttons(True)
+        header.set_show_start_title_buttons(False)
+        header.set_title_widget(Adw.WindowTitle(title=self._extension.name))
 
-        # Source selector row
-        source_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
-        source_row.set_margin_start(16)
-        source_row.set_margin_end(16)
-        source_row.set_margin_top(8)
-        source_row.set_margin_bottom(4)
+        back_btn = Gtk.Button(icon_name="go-previous-symbolic")
+        back_btn.set_tooltip_text("Back")
+        back_btn.connect("clicked", lambda *_: self._on_back() if self._on_back else None)
+        header.pack_start(back_btn)
 
-        src_label = Gtk.Label(label="Source:")
-        src_label.add_css_class("dim-label")
-        source_row.append(src_label)
-
-        self._source_combo = Gtk.DropDown()
-        self._source_combo.set_hexpand(True)
-        source_row.append(self._source_combo)
-
-        top.append(source_row)
+        self.append(header)
 
         # Mode tabs: Popular | Latest | Search
+        top = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=0)
+
         tab_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=0)
         tab_box.set_margin_start(16)
         tab_box.set_margin_end(16)
-        tab_box.set_margin_bottom(4)
+        tab_box.set_margin_top(8)
+        tab_box.set_margin_bottom(8)
         tab_box.add_css_class("linked")
 
         self._popular_btn = Gtk.ToggleButton(label="Popular")
@@ -88,7 +138,7 @@ class BrowseView(Gtk.Box):
         search_box.set_margin_bottom(8)
 
         self._search_entry = Gtk.SearchEntry()
-        self._search_entry.set_placeholder_text("Search manga...")
+        self._search_entry.set_placeholder_text(f"Search {self._extension.name}...")
         self._search_entry.set_hexpand(True)
         self._search_entry.connect("activate", self._on_search_activate)
 
@@ -115,7 +165,7 @@ class BrowseView(Gtk.Box):
         self._empty = EmptyState(
             "find-location-symbolic",
             "No manga found",
-            "Try a different search term or source"
+            "Try a different search term"
         )
         self._stack.add_named(self._empty, "empty")
 
@@ -139,31 +189,12 @@ class BrowseView(Gtk.Box):
         grid_box.append(self._load_more_box)
 
         self._stack.add_named(grid_box, "grid")
-        self.append(self._stack)
-
-    def _select_default_extension(self):
-        registry = get_registry()
-        extensions = registry.get_all()
-        if not extensions:
-            return
-
-        # Build source dropdown
-        names = [ext.name for ext in extensions]
-        str_list = Gtk.StringList.new(names)
-        self._source_combo.set_model(str_list)
-        self._extensions_list = extensions
-        self._source_combo.set_selected(0)
-        self._source_combo.connect("notify::selected", self._on_source_changed)
-
-        self._current_extension = extensions[0]
-        self._load_page(1)
-
-    def _on_source_changed(self, combo, _):
-        idx = combo.get_selected()
-        if 0 <= idx < len(self._extensions_list):
-            self._current_extension = self._extensions_list[idx]
-            self._manga_list = []
-            self._load_page(1)
+        
+        # Make the grid scrollable
+        scroll = Gtk.ScrolledWindow()
+        scroll.set_vexpand(True)
+        scroll.set_child(self._stack)
+        self.append(scroll)
 
     def _on_mode_changed(self, btn, mode):
         if not btn.get_active():
@@ -182,13 +213,11 @@ class BrowseView(Gtk.Box):
             self._load_page(1)
 
     def _load_page(self, page: int):
-        if not self._current_extension:
-            return
         self._current_page = page
         if page == 1:
             self._stack.set_visible_child_name("loading")
 
-        ext = self._current_extension
+        ext = self._extension
         mode = self._current_mode
         query = self._search_query
 
@@ -226,8 +255,7 @@ class BrowseView(Gtk.Box):
     def _on_error(self, message):
         self._loading_more = False
         self._stack.set_visible_child_name("empty")
-        # Show error toast if possible
-        print(f"[browse] Error: {message}")
+        print(f"[source_catalog] Error: {message}")
 
     def _load_more(self, *_):
         if self._loading_more or not self._has_next:

@@ -442,6 +442,10 @@ class Database:
         """, (limit,)).fetchall()
         return [dict(r) for r in rows]
 
+    def delete_history_item(self, history_id: int):
+        self.conn.execute("DELETE FROM history WHERE id=?", (history_id,))
+        self.conn.commit()
+
     # ── Settings ───────────────────────────────────────────────────────────
 
     def get_setting(self, key: str, default: str = "") -> str:

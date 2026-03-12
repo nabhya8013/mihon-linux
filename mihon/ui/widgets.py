@@ -45,6 +45,16 @@ class MangaCard(Gtk.Box):
 
         overlay.set_child(self._placeholder)
 
+        # Chapter count badge
+        if manga.chapter_count > 0:
+            count_badge = Gtk.Label(label=f"{manga.chapter_count} Ch")
+            count_badge.add_css_class("unread-badge") 
+            count_badge.set_halign(Gtk.Align.START)
+            count_badge.set_valign(Gtk.Align.START)
+            count_badge.set_margin_start(6)
+            count_badge.set_margin_top(6)
+            overlay.add_overlay(count_badge)
+
         # Unread badge
         if manga.unread_count > 0:
             badge = Gtk.Label(label=str(manga.unread_count))
@@ -78,8 +88,17 @@ class MangaCard(Gtk.Box):
         motion.connect("leave", lambda *_: self.remove_css_class("manga-card-hover"))
         self.add_controller(motion)
 
+        # Click handling directly on the Card to guarantee activation
+        click = Gtk.GestureClick()
+        click.connect("pressed", self._on_card_clicked)
+        self.add_controller(click)
+
         # Load cover
         self._load_cover(overlay)
+
+    def _on_card_clicked(self, gesture, n_press, x, y):
+        if self._on_click:
+            self._on_click(self.manga)
 
     def _load_cover(self, overlay):
         url = self.manga.cover_local_path or self.manga.cover_url

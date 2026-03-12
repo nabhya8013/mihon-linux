@@ -56,6 +56,27 @@ class WebtoonView(Gtk.ScrolledWindow):
         self.set_child(viewport)
         self._page_widgets = []
 
+        adj = self.get_vadjustment()
+        adj.connect("value-changed", self._on_scroll_changed)
+        self._on_end = None
+
+    def set_on_end(self, cb):
+        self._on_end = cb
+
+    def _on_scroll_changed(self, adj):
+        if not self._page_widgets:
+            return
+        if getattr(self, "_transitioning", False):
+            return
+            
+        # Only trigger when practically at the very bottom
+        if adj.get_value() + adj.get_page_size() >= adj.get_upper() - 5:
+            if self._on_end:
+                self._transitioning = True
+                self._on_end()
+                # reset guard after some time so we don't spam if they stay at bottom without loading next
+                GLib.timeout_add(1000, lambda: setattr(self, "_transitioning", False) or False)
+
     def set_pages(self, pages, on_page_visible=None):
         # Clear
         child = self._box.get_first_child()
@@ -122,28 +143,12 @@ class ReaderView(Gtk.Box):
         self._setup_keyboard()
 
     def _build_ui(self):
-        # Top bar (auto-hide)
-        self._top_bar = Adw.HeaderBar()
-        self._top_bar.add_css_class("reader-header")
-        self._top_bar.set_show_end_title_buttons(False)
+        # The main container is an overlay
+        self._main_overlay = Gtk.Overlay()
+        self.append(self._main_overlay)
+        self.set_vexpand(True)
 
-        back_btn = Gtk.Button(icon_name="go-previous-symbolic")
-        back_btn.set_tooltip_text("Back to manga (Esc)")
-        back_btn.connect("clicked", self._close)
-        self._top_bar.pack_start(back_btn)
-
-        self._chapter_title = Adw.WindowTitle()
-        self._top_bar.set_title_widget(self._chapter_title)
-
-        # Reader settings button
-        settings_btn = Gtk.MenuButton(icon_name="preferences-system-symbolic")
-        settings_btn.set_tooltip_text("Reader settings")
-        settings_btn.set_popover(self._build_settings_popover())
-        self._top_bar.pack_end(settings_btn)
-
-        self.append(self._top_bar)
-
-        # Main reader area
+        # ── Main Reader Area (Background layer) ────────────────────────────
         self._reader_stack = Gtk.Stack()
         self._reader_stack.set_vexpand(True)
         self._reader_stack.set_transition_type(Gtk.StackTransitionType.NONE)
@@ -155,7 +160,7 @@ class ReaderView(Gtk.Box):
         self._page_view = PageView()
         self._paged_overlay.set_child(self._page_view)
 
-        # Loading spinner overlay
+        # Loading spinner
         self._page_spinner = Gtk.Spinner()
         self._page_spinner.set_size_request(48, 48)
         self._page_spinner.set_halign(Gtk.Align.CENTER)
@@ -163,40 +168,92 @@ class ReaderView(Gtk.Box):
         self._page_spinner.add_css_class("reader-spinner")
         self._paged_overlay.add_overlay(self._page_spinner)
 
-        # Tap zones for navigation
+        # Tap zones (Left, Center, Right) for navigation
+        tap_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL)
+        
         self._left_zone = Gtk.Button()
         self._left_zone.set_opacity(0)
-        self._left_zone.set_size_request(120, -1)
-        self._left_zone.set_halign(Gtk.Align.START)
-        self._left_zone.set_valign(Gtk.Align.FILL)
-        self._left_zone.set_vexpand(True)
+        self._left_zone.set_hexpand(True)
         self._left_zone.connect("clicked", self._on_left_tap)
-        self._paged_overlay.add_overlay(self._left_zone)
+        tap_box.append(self._left_zone)
+
+        self._center_zone = Gtk.Button()
+        self._center_zone.set_opacity(0)
+        self._center_zone.set_hexpand(True)
+        self._center_zone.connect("clicked", self._toggle_ui)
+        tap_box.append(self._center_zone)
 
         self._right_zone = Gtk.Button()
         self._right_zone.set_opacity(0)
-        self._right_zone.set_size_request(120, -1)
-        self._right_zone.set_halign(Gtk.Align.END)
-        self._right_zone.set_valign(Gtk.Align.FILL)
-        self._right_zone.set_vexpand(True)
+        self._right_zone.set_hexpand(True)
         self._right_zone.connect("clicked", self._on_right_tap)
-        self._paged_overlay.add_overlay(self._right_zone)
+        tap_box.append(self._right_zone)
 
+        self._paged_overlay.add_overlay(tap_box)
         self._reader_stack.add_named(self._paged_overlay, "paged")
 
         # Webtoon view
+        # We also need a tap zone to toggle UI in webtoon mode
+        self._webtoon_overlay = Gtk.Overlay()
         self._webtoon_view = WebtoonView()
-        self._reader_stack.add_named(self._webtoon_view, "webtoon")
+        self._webtoon_view.set_on_end(self._on_chapter_finished)
+        self._webtoon_overlay.set_child(self._webtoon_view)
+        
+        webtoon_center = Gtk.Button()
+        webtoon_center.set_opacity(0)
+        webtoon_center.set_hexpand(True)
+        webtoon_center.set_vexpand(True)
+        webtoon_center.connect("clicked", self._toggle_ui)
+        
+        # We don't want the button to block scroll completely, so we just use the overlay
+        # Note: A full transparent button blocks mouse scrolling. For Tachiyomi style, 
+        # a Gtk.GestureClick on the overlay is better, but since GTK doesn't easily let 
+        # gestures pass through without stopping propagation unless configured carefully, 
+        # we will add a thin strip or just rely on the HUD.
+        self._webtoon_gesture = Gtk.GestureClick.new()
+        self._webtoon_gesture.set_button(0) # any button
+        self._webtoon_gesture.connect("pressed", lambda g, n, x, y: self._toggle_ui())
+        self._webtoon_overlay.add_controller(self._webtoon_gesture)
 
-        self.append(self._reader_stack)
+        self._reader_stack.add_named(self._webtoon_overlay, "webtoon")
+        
+        # Set background to main overlay
+        self._main_overlay.set_child(self._reader_stack)
 
-        # Bottom bar
+        # ── HUD Overlays (Foreground layers) ───────────────────────────────
+
+        # Top bar (auto-hide)
+        self._top_bar = Adw.HeaderBar()
+        self._top_bar.add_css_class("reader-header")
+        self._top_bar.set_show_end_title_buttons(False)
+        self._top_bar.set_show_start_title_buttons(False)
+        self._top_bar.set_valign(Gtk.Align.START)
+
+        back_btn = Gtk.Button(icon_name="go-previous-symbolic")
+        back_btn.set_tooltip_text("Back to manga (Esc)")
+        back_btn.connect("clicked", self._close)
+        self._top_bar.pack_start(back_btn)
+
+        self._chapter_title = Adw.WindowTitle()
+        self._top_bar.set_title_widget(self._chapter_title)
+
+        settings_btn = Gtk.MenuButton(icon_name="preferences-system-symbolic")
+        settings_btn.set_tooltip_text("Reader settings")
+        settings_btn.set_popover(self._build_settings_popover())
+        self._top_bar.pack_end(settings_btn)
+
+        self._main_overlay.add_overlay(self._top_bar)
+
+        # Bottom HUD (Controls + Slider)
+        self._bottom_hud = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=0)
+        self._bottom_hud.set_valign(Gtk.Align.END)
+        self._bottom_hud.add_css_class("reader-bottom-hud") # We will style this with a background
+
+        # Controls row
         self._bottom_bar = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
-        self._bottom_bar.add_css_class("reader-bottom-bar")
         self._bottom_bar.set_margin_start(16)
         self._bottom_bar.set_margin_end(16)
         self._bottom_bar.set_margin_top(8)
-        self._bottom_bar.set_margin_bottom(8)
 
         prev_btn = Gtk.Button(icon_name="go-previous-symbolic")
         prev_btn.connect("clicked", lambda *_: self._prev_page())
@@ -206,6 +263,8 @@ class ReaderView(Gtk.Box):
         self._page_label = Gtk.Label(label="0 / 0")
         self._page_label.set_hexpand(True)
         self._page_label.set_justify(Gtk.Justification.CENTER)
+        # Give it a background for visibility
+        self._page_label.add_css_class("reader-page-indicator")
         self._bottom_bar.append(self._page_label)
 
         next_btn = Gtk.Button(icon_name="go-next-symbolic")
@@ -213,13 +272,13 @@ class ReaderView(Gtk.Box):
         next_btn.set_tooltip_text("Next page (→ or D)")
         self._bottom_bar.append(next_btn)
 
-        self.append(self._bottom_bar)
+        self._bottom_hud.append(self._bottom_bar)
 
-        # Page slider (shown below bottom bar)
+        # Page slider
         self._slider_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
         self._slider_box.set_margin_start(16)
         self._slider_box.set_margin_end(16)
-        self._slider_box.set_margin_bottom(8)
+        self._slider_box.set_margin_bottom(16)
 
         self._slider = Gtk.Scale(orientation=Gtk.Orientation.HORIZONTAL)
         self._slider.set_hexpand(True)
@@ -229,7 +288,14 @@ class ReaderView(Gtk.Box):
         self._slider_box.append(self._slider)
         self._slider_changing = False
 
-        self.append(self._slider_box)
+        self._bottom_hud.append(self._slider_box)
+
+        self._main_overlay.add_overlay(self._bottom_hud)
+
+    def _toggle_ui(self, *_):
+        self._ui_visible = not self._ui_visible
+        self._top_bar.set_visible(self._ui_visible)
+        self._bottom_hud.set_visible(self._ui_visible)
 
     def _build_settings_popover(self) -> Gtk.Popover:
         pop = Gtk.Popover()
@@ -363,7 +429,7 @@ class ReaderView(Gtk.Box):
             return True
         return False
 
-    def load_chapter(self, manga: Manga, chapter: Chapter):
+    def load_chapter(self, manga: Manga, chapter: Chapter, force_start: bool = False):
         """Load a chapter for reading."""
         self._manga = manga
         self._chapter = chapter
@@ -398,17 +464,17 @@ class ReaderView(Gtk.Box):
                         for i, f in enumerate(files):
                             p = Page(index=i, url=str(f), image_url=str(f), local_path=str(f))
                             pages.append(p)
-                        GLib.idle_add(self._on_pages_loaded, pages)
+                        GLib.idle_add(self._on_pages_loaded, pages, force_start)
                         return
 
                 pages = ext.get_pages(chapter)
-                GLib.idle_add(self._on_pages_loaded, pages)
+                GLib.idle_add(self._on_pages_loaded, pages, force_start)
             except Exception as e:
                 GLib.idle_add(self._on_load_error, str(e))
 
         threading.Thread(target=fetch, daemon=True).start()
 
-    def _on_pages_loaded(self, pages):
+    def _on_pages_loaded(self, pages, force_start=False):
         self._pages = pages
         self._page_spinner.stop()
         self._page_spinner.set_visible(False)
@@ -417,8 +483,13 @@ class ReaderView(Gtk.Box):
             self._page_label.set_text("No pages found")
             return
 
-        # Restore last page
-        if self._chapter.last_page_read > 0:
+        # Restore last page or start from beginning
+        if force_start:
+            self._current_page = 0
+            # Automatically save progress to reset it in the database as well
+            if self._chapter and self._chapter.id:
+                self._db.update_chapter_progress(self._chapter.id, 0)
+        elif self._chapter.last_page_read > 0:
             self._current_page = min(self._chapter.last_page_read, len(pages) - 1)
         else:
             self._current_page = 0
@@ -499,8 +570,39 @@ class ReaderView(Gtk.Box):
     def _on_chapter_finished(self):
         """All pages read — mark chapter as read."""
         if self._chapter and self._chapter.id:
-            self._db.mark_chapter_read(self._chapter.id, len(self._pages) - 1)
-            self._chapter.read = True
+            if not getattr(self._chapter, 'read', False):
+                self._db.mark_chapter_read(self._chapter.id, len(self._pages) - 1)
+                self._chapter.read = True
+            
+            self._go_to_next_chapter()
+
+    def _go_to_next_chapter(self):
+        if getattr(self, "_transitioning_chapter", False):
+            return
+        self._transitioning_chapter = True
+
+        if not self._manga or not self._manga.id:
+            self._transitioning_chapter = False
+            return
+        
+        chapters = self._db.get_chapters(self._manga.id)
+        # Sort ascending by chapter_number
+        chapters = sorted(chapters, key=lambda c: c.chapter_number)
+        
+        next_ch = None
+        for ch in chapters:
+            if ch.chapter_number > self._chapter.chapter_number:
+                next_ch = ch
+                break
+                
+        if not next_ch:
+            self._transitioning_chapter = False
+            return
+            
+        # Load the next chapter seamlessly, forcing start from beginning
+        self.load_chapter(self._manga, next_ch, force_start=True)
+        # Reset flag after some time so that we don't block subsequent transitions
+        GLib.timeout_add(1000, lambda: setattr(self, "_transitioning_chapter", False) or False)
 
     def _save_progress(self, page_idx: int):
         if self._chapter and self._chapter.id and self._manga and self._manga.id:

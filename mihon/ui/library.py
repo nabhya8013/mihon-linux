@@ -17,9 +17,10 @@ class LibraryView(Gtk.Box):
     Has category tabs, search, and filter controls.
     """
 
-    def __init__(self, on_manga_selected=None):
+    def __init__(self, on_manga_selected=None, on_show_downloads=None):
         super().__init__(orientation=Gtk.Orientation.VERTICAL, spacing=0)
         self._on_manga_selected = on_manga_selected
+        self._on_show_downloads = on_show_downloads
         self._all_manga = []
         self._filtered_manga = []
         self._search_query = ""
@@ -50,6 +51,13 @@ class LibraryView(Gtk.Box):
         filter_menu = self._build_filter_menu()
         filter_btn.set_popover(filter_menu)
         header_box.append(filter_btn)
+
+        # Downloads button
+        dl_btn = Gtk.Button(icon_name="folder-download-symbolic")
+        dl_btn.set_tooltip_text("Show Downloads")
+        if self._on_show_downloads:
+            dl_btn.connect("clicked", lambda *_: self._on_show_downloads())
+        header_box.append(dl_btn)
 
         self.append(header_box)
 

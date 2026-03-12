@@ -36,14 +36,7 @@ class MangaDetailView(Gtk.Box):
         # Header bar
         header = Adw.HeaderBar()
         header.set_show_end_title_buttons(True)
-
-        back_btn = Gtk.Button(icon_name="go-previous-symbolic")
-        back_btn.set_tooltip_text("Back")
-        back_btn.connect("clicked", lambda *_: self._on_back() if self._on_back else None)
-        header.pack_start(back_btn)
-
-        self._title_label = Adw.WindowTitle()
-        header.set_title_widget(self._title_label)
+        # show_start_title_buttons is True by default for NavigationView to display the back button
 
         self.append(header)
 
@@ -54,25 +47,39 @@ class MangaDetailView(Gtk.Box):
 
         main_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=0)
 
-        # ── Info section ──────────────────────────────────────────────────
-        info_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=16)
-        info_box.set_margin_start(16)
-        info_box.set_margin_end(16)
-        info_box.set_margin_top(16)
-        info_box.set_margin_bottom(8)
+        # ── Header Overlay (Parallax/Blurred Background) ───────────────────
+        header_overlay = Gtk.Overlay()
+        header_overlay.set_hexpand(True)
 
-        # Cover
+        self._bg_cover = Gtk.Picture()
+        self._bg_cover.set_content_fit(Gtk.ContentFit.COVER)
+        self._bg_cover.set_opacity(0.15)
+        self._bg_cover.set_can_focus(False)
+        self._bg_cover.set_hexpand(True)
+        self._bg_cover.add_css_class("view")
+        header_overlay.set_child(self._bg_cover)
+
+        # ── Info section (Foreground of Overlay) ───────────────────────────
+        info_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=20)
+        info_box.set_valign(Gtk.Align.END)
+        info_box.set_margin_start(24)
+        info_box.set_margin_end(24)
+        info_box.set_margin_top(48)
+        info_box.set_margin_bottom(24)
+
+        # Cover (Front)
         cover_frame = Gtk.Frame()
         cover_frame.add_css_class("card")
         self._cover = Gtk.Picture()
         self._cover.set_content_fit(Gtk.ContentFit.COVER)
-        self._cover.set_size_request(160, 240)
+        self._cover.set_size_request(120, 180)
         cover_frame.set_child(self._cover)
         info_box.append(cover_frame)
 
         # Text info
-        text_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
+        text_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
         text_box.set_vexpand(True)
+        text_box.set_valign(Gtk.Align.CENTER)
 
         self._manga_title = Gtk.Label()
         self._manga_title.set_wrap(True)
@@ -103,47 +110,50 @@ class MangaDetailView(Gtk.Box):
         text_box.append(self._score_label)
 
         info_box.append(text_box)
-        main_box.append(info_box)
+        header_overlay.add_overlay(info_box)
+        header_overlay.set_measure_overlay(info_box, True)
+
+        main_box.append(header_overlay)
 
         # ── Action buttons ─────────────────────────────────────────────────
-        action_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        action_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=12)
         action_box.set_margin_start(16)
         action_box.set_margin_end(16)
-        action_box.set_margin_bottom(8)
+        action_box.set_margin_top(8)
+        action_box.set_margin_bottom(16)
 
-        self._library_btn = Gtk.Button()
-        self._library_btn.set_hexpand(True)
+        # Add to Library / Tracking
+        lib_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
+        self._library_btn = Gtk.Button(icon_name="bookmark-new-symbolic")
+        self._library_btn.add_css_class("circular")
+        self._library_btn.set_size_request(48, 48)
+        self._library_btn.set_halign(Gtk.Align.CENTER)
         self._library_btn.connect("clicked", self._toggle_library)
-        self._library_btn.add_css_class("pill")
-        action_box.append(self._library_btn)
+        lib_box.append(self._library_btn)
+        lib_lbl = Gtk.Label(label="Add")
+        lib_lbl.add_css_class("caption")
+        lib_box.append(lib_lbl)
+        action_box.append(lib_box)
 
-        # Reading status dropdown
-        self._status_menu = Gtk.MenuButton()
-        self._status_menu.set_icon_name("view-list-symbolic")
-        self._status_menu.set_tooltip_text("Set reading status")
+        # WebView / Browse
+        web_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
+        web_btn = Gtk.Button(icon_name="web-browser-symbolic")
+        web_btn.add_css_class("circular")
+        web_btn.set_size_request(48, 48)
+        web_btn.set_halign(Gtk.Align.CENTER)
+        web_box.append(web_btn)
+        web_lbl = Gtk.Label(label="WebView")
+        web_lbl.add_css_class("caption")
+        web_box.append(web_lbl)
+        action_box.append(web_box)
 
-        status_popover = Gtk.Popover()
-        status_list = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
-        status_list.set_margin_start(8)
-        status_list.set_margin_end(8)
-        status_list.set_margin_top(8)
-        status_list.set_margin_bottom(8)
-        for status in ReadingStatus:
-            if status == ReadingStatus.NONE:
-                continue
-            btn = Gtk.Button(label=status.value.replace("_", " ").title())
-            btn.add_css_class("flat")
-            btn.connect("clicked", self._set_reading_status, status, status_popover)
-            status_list.append(btn)
-        status_popover.set_child(status_list)
-        self._status_menu.set_popover(status_popover)
-        action_box.append(self._status_menu)
-
-        # Continue reading button
-        self._continue_btn = Gtk.Button(label="Continue Reading")
+        # Continue reading button (Dominant FAB)
+        self._continue_btn = Gtk.Button(label="Continue")
         self._continue_btn.add_css_class("suggested-action")
         self._continue_btn.add_css_class("pill")
         self._continue_btn.set_hexpand(True)
+        self._continue_btn.set_valign(Gtk.Align.CENTER)
+        self._continue_btn.set_size_request(-1, 48)
         self._continue_btn.connect("clicked", self._continue_reading)
         action_box.append(self._continue_btn)
 
@@ -188,6 +198,31 @@ class MangaDetailView(Gtk.Box):
         mark_all_btn.connect("clicked", self._mark_all_read)
         ch_header.append(mark_all_btn)
 
+        # Download Menu
+        dl_menu_btn = Gtk.MenuButton(icon_name="folder-download-symbolic")
+        dl_menu_btn.set_tooltip_text("Download Chapters")
+        
+        dl_pop = Gtk.Popover()
+        dl_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
+        dl_box.set_margin_start(4)
+        dl_box.set_margin_end(4)
+        dl_box.set_margin_top(4)
+        dl_box.set_margin_bottom(4)
+        
+        dl_unread_btn = Gtk.Button(label="Download Unread")
+        dl_unread_btn.add_css_class("flat")
+        dl_unread_btn.connect("clicked", lambda *_: (self._download_unread(), dl_pop.popdown()))
+        dl_box.append(dl_unread_btn)
+        
+        dl_all_btn = Gtk.Button(label="Download All")
+        dl_all_btn.add_css_class("flat")
+        dl_all_btn.connect("clicked", lambda *_: (self._download_all_chapters(), dl_pop.popdown()))
+        dl_box.append(dl_all_btn)
+        
+        dl_pop.set_child(dl_box)
+        dl_menu_btn.set_popover(dl_pop)
+        ch_header.append(dl_menu_btn)
+
         main_box.append(ch_header)
         main_box.append(Gtk.Separator())
 
@@ -208,8 +243,6 @@ class MangaDetailView(Gtk.Box):
     def load_manga(self, manga: Manga):
         """Load and display a manga's details."""
         self._manga = manga
-        self._title_label.set_title(manga.title)
-        self._title_label.set_subtitle(manga.author or "")
         self._manga_title.set_text(manga.title)
         self._author_label.set_text(manga.author or "Unknown Author")
         self._status_label.set_markup(
@@ -241,13 +274,23 @@ class MangaDetailView(Gtk.Box):
         url = manga.cover_local_path or manga.cover_url
         if url:
             image_loader.load_image_async(
-                manga.cover_url,
-                lambda pb: self._cover.set_pixbuf(pb) if pb else None,
-                width=160, height=240,
+                url,
+                self._on_cover_loaded,
+                width=320, height=480,  # Higher resolution for the blurred background
             )
 
         # Load details + chapters in background
         self._load_details()
+
+    def _on_cover_loaded(self, pixbuf):
+        if not pixbuf:
+            return
+        
+        # Set foreground cover
+        self._cover.set_pixbuf(pixbuf)
+        
+        # Set background cover (it will be scaled by the widget because of COVER fit)
+        self._bg_cover.set_pixbuf(pixbuf)
 
     def _load_details(self):
         manga = self._manga
@@ -489,3 +532,17 @@ class MangaDetailView(Gtk.Box):
                 print(f"[detail] Download error: {e}")
 
         threading.Thread(target=fetch_and_queue, daemon=True).start()
+
+    def _download_unread(self):
+        if not self._chapters:
+            return
+        for ch in self._chapters:
+            if not ch.read and ch.download_status != DownloadStatus.DOWNLOADED:
+                self._download_chapter(ch)
+                
+    def _download_all_chapters(self):
+        if not self._chapters:
+            return
+        for ch in self._chapters:
+            if ch.download_status != DownloadStatus.DOWNLOADED:
+                self._download_chapter(ch)
