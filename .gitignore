@@ -1,5 +1,5 @@
 # Python
-__pycache__/
+**/__pycache__/
 *.py[cod]
 *$py.class
 *.egg-info/
@@ -19,9 +19,28 @@ env/
 *.swo
 *~
 
+# Environment files
+.env
+.env.*
+
 # App data
 *.db
 *.sqlite3
+*.db-shm
+*.db-wal
+
+# Logs
+*.log
+log.out
+log.err
+
+# Python tooling
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+.coverage.*
+htmlcov/
 
 # OS
 .DS_Store
@@ -29,3 +48,19 @@ Thumbs.db
 
 # Gemini
 .gemini/
+
+# Gradle / JVM
+.gradle/
+**/.gradle/
+**/build/
+**/out/
+*.class
+**/*.jar
+!bridge/gradle/wrapper/gradle-wrapper.jar
+bridge/gradle-*/
+bridge/*.zip
+
+# Data / Temp
+payload.json
+*.apk
+*.dex

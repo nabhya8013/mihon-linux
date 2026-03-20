@@ -22,6 +22,7 @@ No Electron bloat. No web wrappers. Just pure, native Python and GTK.
 
 - **🎨 Modern Adwaita UI:** Gorgeous, adaptive design perfectly matched for Linux.
 - **🔌 Extensible Sources:** Read from multiple sources. Ships with built-in extensions for **MangaDex** and **AllManga**.
+- **🤖 Android APK Support:** Native support for Tachiyomi APK extensions via an embedded JVM bridge.
 - **📚 Personal Library:** Save your favorite manga, organize them with categories, and effortlessly track your reading status.
 - **🔍 Seamless Discovery:** Browse popular manga, check latest updates, or search directly from the UI.
 - **⚡ Blazing Fast Reader:** Asynchronous image loading and background caching ensure your reading experience is buttery smooth without blocking the UI.
@@ -45,19 +46,19 @@ Because Mihon Linux is built natively, you'll need the GTK4 and libadwaita devel
 ```bash
 sudo apt update
 sudo apt install -y python3 python3-pip python3-gi python3-requests \
-    gir1.2-gtk-4.0 gir1.2-adw-1 gir1.2-pango-1.0
+    gir1.2-gtk-4.0 gir1.2-adw-1 gir1.2-pango-1.0 openjdk-21-jdk
 ```
 
 **Fedora:**
 ```bash
 sudo dnf install python3 python3-pip python3-gobject python3-requests \
-    gtk4 libadwaita
+    gtk4 libadwaita java-21-openjdk
 ```
 
 **Arch Linux / Manjaro:**
 ```bash
 sudo pacman -S python python-pip python-gobject python-requests \
-    gtk4 libadwaita
+    gtk4 libadwaita jdk21-openjdk
 ```
 
 ### 2. Clone & Run
@@ -67,8 +68,12 @@ sudo pacman -S python python-pip python-gobject python-requests \
 git clone https://github.com/nabhya8013/mihon-linux.git
 cd mihon-linux
 
-# (Optional) Install Python packages if your system needs them
+# Install Python packages
 pip install -r requirements.txt
+
+# (Optional) Build the JVM Bridge for Android extensions
+# Skip this if you only use built-in MangaDex/AllManga
+cd bridge && ./gradlew jar && cd ..
 
 # Launch the app!
 ./mihon.sh
