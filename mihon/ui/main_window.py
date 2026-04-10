@@ -9,6 +9,7 @@ from gi.repository import Gtk, Adw, GLib, GObject
 from ..core.models import Manga, Chapter
 from .library import LibraryView
 from .browse import BrowseView, SourceCatalogView
+from .updates import UpdatesView
 from .manga_detail import MangaDetailView
 from .reader import ReaderView
 
@@ -71,12 +72,9 @@ class MainWindow(Adw.ApplicationWindow):
         )
         self._tab_stack.add_titled_with_icon(self._library_view, "library", "Library", "library-symbolic")
 
-        # 2. Updates (Placeholder)
-        self.updates_placeholder = Gtk.Box()
-        lbl = Gtk.Label(label="Updates (Coming Soon)", hexpand=True, vexpand=True)
-        lbl.add_css_class("dim-label")
-        self.updates_placeholder.append(lbl)
-        self._tab_stack.add_titled_with_icon(self.updates_placeholder, "updates", "Updates", "view-refresh-symbolic")
+        # 2. Updates
+        self._updates_view = UpdatesView(on_manga_selected=self._show_manga_detail)
+        self._tab_stack.add_titled_with_icon(self._updates_view, "updates", "Updates", "view-refresh-symbolic")
 
         # 3. History
         self._history_view = self._build_history_view()
@@ -113,6 +111,9 @@ class MainWindow(Adw.ApplicationWindow):
         current = stack.get_visible_child_name()
         if current == "library":
             self._library_view.reload()
+        elif current == "updates":
+            self._updates_view.ensure_initial_check()
+            self._updates_view.refresh_cached()
         elif current == "history":
             self._refresh_history()
         elif current == "more":
@@ -131,17 +132,40 @@ class MainWindow(Adw.ApplicationWindow):
 
     def _show_manga_detail(self, manga: Manga):
         self._detail_view.load_manga(manga)
-        self._nav_view.push(self._detail_page)
+        # Pop back to a safe point before pushing the detail singleton page.
+        # If we're deeper than main (e.g. on a catalog page), pop to main first.
+        try:
+            self._nav_view.pop_to_tag("main")
+        except Exception:
+            pass
+        try:
+            self._nav_view.push(self._detail_page)
+        except Exception:
+            pass
 
     def _show_reader(self, manga: Manga, chapter):
         self._reader_view.load_chapter(manga, chapter)
-        self._nav_view.push(self._reader_page)
+        # Ensure we're on the detail page before pushing reader
+        try:
+            self._nav_view.pop_to_tag("detail")
+        except Exception:
+            pass
+        try:
+            self._nav_view.push(self._reader_page)
+        except Exception:
+            pass
 
     def _pop_to_main(self):
-        self._nav_view.pop()
+        try:
+            self._nav_view.pop_to_tag("main")
+        except Exception:
+            self._nav_view.pop()
 
     def _pop_to_detail(self):
-        self._nav_view.pop()
+        try:
+            self._nav_view.pop_to_tag("detail")
+        except Exception:
+            self._nav_view.pop()
 
     def _switch_to_downloads(self):
         self._tab_stack.set_visible_child_name("more")

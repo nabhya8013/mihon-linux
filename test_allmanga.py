@@ -4,7 +4,16 @@ from mihon.core.models import Manga, SearchFilter
 ext = AllMangaExtension()
 # 1. search for a manga
 print("Searching...")
-mangas, _ = ext.search(SearchFilter(query="more than a married couple but not lovers"))
+try:
+    mangas, _ = ext.search(SearchFilter(query="more than a married couple but not lovers"))
+except Exception as e:
+    print("Search failed (network/source may be unavailable):", e)
+    raise SystemExit(0)
+
+if not mangas:
+    print("No results returned (network/source may be unavailable).")
+    raise SystemExit(0)
+
 m=mangas[0]
 print("Found manga:", m.title, m.source_manga_id)
 
@@ -19,4 +28,3 @@ chapters = ext.get_chapters(m)
 print("Found chapters:", len(chapters))
 if chapters:
     print("Chapter 0:", chapters[0].title)
-
