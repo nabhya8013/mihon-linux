@@ -61,13 +61,13 @@ pip install -r requirements.txt
 Use this exact command:
 
 ```bash
-cd /home/nabhya/mihon-linux/bridge && JAVA_HOME=/usr/lib/jvm/java-21-openjdk ./gradlew jar
+cd /home/your-name/mihon-linux/bridge && JAVA_HOME=/usr/lib/jvm/java-21-openjdk ./gradlew jar
 ```
 
 ### 2. Run app
 
 ```bash
-cd /home/nabhya/mihon-linux && python3 run.py
+cd /home/your-name/mihon-linux && python3 run.py
 ```
 
 ## Updates Page Workflow
@@ -83,7 +83,7 @@ cd /home/nabhya/mihon-linux && python3 run.py
 You can run a non-UI check directly:
 
 ```bash
-cd /home/nabhya/mihon-linux
+cd /home/your-name/mihon-linux
 python3 - <<'PY'
 from mihon.core.library_updater import LibraryUpdater
 s = LibraryUpdater().check_updates()
