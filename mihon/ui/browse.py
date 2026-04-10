@@ -520,6 +520,8 @@ class SourceCatalogView(Gtk.Box):
     def _on_results(self, results, has_next, page):
         self._has_next = has_next
         self._loading_more = False
+        self._load_more_btn.set_label("Load More")
+        self._load_more_btn.set_sensitive(True)
         if page == 1:
             self._manga_list = results
             if results:
@@ -535,6 +537,8 @@ class SourceCatalogView(Gtk.Box):
 
     def _on_error(self, message):
         self._loading_more = False
+        self._load_more_btn.set_label("Load More")
+        self._load_more_btn.set_sensitive(True)
         self._stack.set_visible_child_name("empty")
         print(f"[source_catalog] Error: {message}")
 
@@ -545,5 +549,3 @@ class SourceCatalogView(Gtk.Box):
         self._load_more_btn.set_label("Loading...")
         self._load_more_btn.set_sensitive(False)
         self._load_page(self._current_page + 1)
-        self._load_more_btn.set_label("Load More")
-        self._load_more_btn.set_sensitive(True)

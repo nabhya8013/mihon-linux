@@ -4,6 +4,9 @@ from mihon.core.models import Manga, SearchFilter
 ext = MangaDexExtension()
 print("Searching...")
 mangas, _ = ext.search(SearchFilter(query="more than a married couple but not lovers"))
+if not mangas:
+    print("No results returned (network/source may be unavailable).")
+    raise SystemExit(0)
 m = mangas[0]
 print("Found manga:", m.title, m.source_manga_id)
 
