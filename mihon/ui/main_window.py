@@ -24,6 +24,7 @@ class MainWindow(Adw.ApplicationWindow):
 
         self._navigation_stack = []  # For back navigation
         self._build_ui()
+        GLib.idle_add(self._run_startup_tasks)
 
     def _build_ui(self):
         # The root is a NavigationView to handle pushing/popping pages
@@ -118,6 +119,14 @@ class MainWindow(Adw.ApplicationWindow):
             self._refresh_history()
         elif current == "more":
             self._refresh_downloads()
+
+    def _run_startup_tasks(self):
+        from ..core.database import get_db
+
+        auto_update = get_db().get_setting("auto_update_library", "1") == "1"
+        if auto_update:
+            self._updates_view.ensure_initial_check()
+        return False
 
     # ── Navigation ─────────────────────────────────────────────────────────
 
@@ -321,8 +330,15 @@ class MainWindow(Adw.ApplicationWindow):
         lib_group = Adw.PreferencesGroup(title="Library")
         content.append(lib_group)
 
-        update_row = Adw.SwitchRow(title="Auto-update library", subtitle="Check for new chapters on startup")
-        lib_group.add(update_row)
+        from ..core.database import get_db
+        self._auto_update_row = Adw.SwitchRow(
+            title="Auto-update library",
+            subtitle="Check for new chapters on startup",
+        )
+        auto_update = get_db().get_setting("auto_update_library", "1") == "1"
+        self._auto_update_row.set_active(auto_update)
+        self._auto_update_row.connect("notify::active", self._on_auto_update_toggled)
+        lib_group.add(self._auto_update_row)
 
         unread_row = Adw.SwitchRow(title="Show unread badge", subtitle="Show unread chapter count on covers")
         unread_row.set_active(True)
@@ -339,6 +355,12 @@ class MainWindow(Adw.ApplicationWindow):
         scroll.set_child(content)
         box.append(scroll)
         return box
+
+    def _on_auto_update_toggled(self, row, _pspec):
+        from ..core.database import get_db
+
+        value = "1" if row.get_active() else "0"
+        get_db().set_setting("auto_update_library", value)
 
     def _refresh_downloads(self):
         from ..core.downloader import get_download_manager
