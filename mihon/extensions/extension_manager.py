@@ -123,9 +123,20 @@ class ExtensionManager:
             }, timeout=30.0)
         except BridgeError as e:
             logger.error(f"Failed to load extension {stem}: {e}")
+            print(f"[ext_manager] Bridge error loading {stem}: {e}")
+            return None
+
+        if not result:
+            logger.warning(f"Bridge returned empty result for {stem}")
             return None
 
         sources = result.get("sources", [])
+        if not sources:
+            loaded_count = result.get("loaded", 0)
+            logger.warning(f"Extension {stem} loaded {loaded_count} sources but none were successful")
+            print(f"[ext_manager] Extension {stem}: 0 sources loaded (class loading failed — check bridge stderr for details)")
+            return None
+
         proxies = []
         for src in sources:
             ext_id = src.get("id", 0)
@@ -140,6 +151,7 @@ class ExtensionManager:
             proxies.append(proxy)
 
         logger.info(f"Loaded {len(proxies)} source(s) from {stem}")
+        print(f"[ext_manager] Loaded {len(proxies)} source(s) from {stem}: {[p.name for p in proxies]}")
         return proxies
 
     def load_all_installed(self) -> List[JvmProxyExtension]:

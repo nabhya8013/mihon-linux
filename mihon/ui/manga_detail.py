@@ -308,11 +308,13 @@ class MangaDetailView(Gtk.Box):
 
                 # Get chapters
                 chapters = ext.get_chapters(updated)
+                print(f"[detail] Extension returned {len(chapters)} chapters")
                 for ch in chapters:
                     ch.manga_id = db_id
                 self._db.upsert_chapters(chapters)
                 # Re-fetch from DB to get IDs
                 db_chapters = self._db.get_chapters(db_id)
+                print(f"[detail] DB returned {len(db_chapters)} chapters after upsert")
                 GLib.idle_add(self._on_details_loaded, updated, db_chapters)
             except Exception as e:
                 print(f"[detail] Error loading details: {e}")

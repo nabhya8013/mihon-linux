@@ -131,17 +131,40 @@ class MainWindow(Adw.ApplicationWindow):
 
     def _show_manga_detail(self, manga: Manga):
         self._detail_view.load_manga(manga)
-        self._nav_view.push(self._detail_page)
+        # Pop back to a safe point before pushing the detail singleton page.
+        # If we're deeper than main (e.g. on a catalog page), pop to main first.
+        try:
+            self._nav_view.pop_to_tag("main")
+        except Exception:
+            pass
+        try:
+            self._nav_view.push(self._detail_page)
+        except Exception:
+            pass
 
     def _show_reader(self, manga: Manga, chapter):
         self._reader_view.load_chapter(manga, chapter)
-        self._nav_view.push(self._reader_page)
+        # Ensure we're on the detail page before pushing reader
+        try:
+            self._nav_view.pop_to_tag("detail")
+        except Exception:
+            pass
+        try:
+            self._nav_view.push(self._reader_page)
+        except Exception:
+            pass
 
     def _pop_to_main(self):
-        self._nav_view.pop()
+        try:
+            self._nav_view.pop_to_tag("main")
+        except Exception:
+            self._nav_view.pop()
 
     def _pop_to_detail(self):
-        self._nav_view.pop()
+        try:
+            self._nav_view.pop_to_tag("detail")
+        except Exception:
+            self._nav_view.pop()
 
     def _switch_to_downloads(self):
         self._tab_stack.set_visible_child_name("more")
