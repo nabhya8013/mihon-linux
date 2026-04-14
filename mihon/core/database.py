@@ -130,6 +130,14 @@ class Database:
             "max_simultaneous_downloads": "3",
             "tracker_anilist_token": "",
             "tracker_mal_token": "",
+            "library_prefs_global": json.dumps({
+                "sort_by": "title",
+                "sort_desc": False,
+                "display_mode": "grid",
+                "status_filters": [],
+                "unread_only": False,
+                "downloaded_only": False,
+            }),
         }
         for key, value in defaults.items():
             c.execute(
@@ -218,6 +226,17 @@ class Database:
             (manga_id,)
         )
         self.conn.commit()
+
+    def remove_from_library_bulk(self, manga_ids: List[int]) -> int:
+        if not manga_ids:
+            return 0
+        placeholders = ",".join("?" for _ in manga_ids)
+        cur = self.conn.execute(
+            f"UPDATE manga SET in_library=0, reading_status='none' WHERE id IN ({placeholders})",
+            tuple(manga_ids),
+        )
+        self.conn.commit()
+        return cur.rowcount
 
     def update_reading_status(self, manga_id: int, status: ReadingStatus):
         self.conn.execute(
@@ -363,6 +382,39 @@ class Database:
                 (status.value, chapter_id)
             )
         self.conn.commit()
+
+    def get_downloaded_manga_ids(self, manga_ids: List[int]) -> set[int]:
+        if not manga_ids:
+            return set()
+        placeholders = ",".join("?" for _ in manga_ids)
+        rows = self.conn.execute(
+            f"""
+            SELECT DISTINCT manga_id
+            FROM chapters
+            WHERE manga_id IN ({placeholders})
+              AND (
+                    download_status=?
+                    OR (local_path IS NOT NULL AND local_path!='')
+                  )
+            """,
+            tuple(manga_ids) + (DownloadStatus.DOWNLOADED.value,),
+        ).fetchall()
+        return {r["manga_id"] for r in rows}
+
+    def mark_manga_chapters_read_bulk(self, manga_ids: List[int]) -> int:
+        if not manga_ids:
+            return 0
+        placeholders = ",".join("?" for _ in manga_ids)
+        cur = self.conn.execute(
+            f"UPDATE chapters SET read=1 WHERE manga_id IN ({placeholders}) AND read=0",
+            tuple(manga_ids),
+        )
+        self.conn.execute(
+            f"UPDATE manga SET unread_count=0 WHERE id IN ({placeholders})",
+            tuple(manga_ids),
+        )
+        self.conn.commit()
+        return cur.rowcount
 
     def _row_to_chapter(self, row) -> Chapter:
         ch = Chapter()

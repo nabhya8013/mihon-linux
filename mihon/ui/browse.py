@@ -8,8 +8,8 @@ gi.require_version("Gtk", "4.0")
 gi.require_version("Adw", "1")
 from gi.repository import Gtk, Adw, GLib, Gio
 import threading
-import os
 from ..core.models import SearchFilter
+from ..core.database import get_db
 from ..extensions.registry import get_registry
 from .widgets import MangaGridView, EmptyState, LoadingSpinner
 
@@ -49,6 +49,10 @@ class BrowseView(Gtk.Box):
         # ── Extensions Tab ────────────────────────────────────────────────
         extensions_page = self._build_extensions_tab()
         self._view_stack.add_titled_with_icon(extensions_page, "extensions", "Extensions", "application-x-addon-symbolic")
+
+        # ── Migrate Tab ───────────────────────────────────────────────────
+        migrate_page = self._build_migrate_tab()
+        self._view_stack.add_titled_with_icon(migrate_page, "migrate", "Migrate", "system-search-symbolic")
 
         self._view_stack.set_visible_child_name("sources")
 
@@ -190,6 +194,250 @@ class BrowseView(Gtk.Box):
         scroll.set_child(box)
         self._load_extensions()
         return scroll
+
+    # ══════════════════════════════════════════════════════════════════════
+    #  MIGRATE TAB
+    # ══════════════════════════════════════════════════════════════════════
+
+    def _build_migrate_tab(self) -> Gtk.Widget:
+        self._migrate_searching = False
+
+        root = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=0)
+
+        controls = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
+        controls.set_margin_start(16)
+        controls.set_margin_end(16)
+        controls.set_margin_top(16)
+        controls.set_margin_bottom(8)
+
+        title = Gtk.Label(label="Find Migration Targets")
+        title.add_css_class("title-4")
+        title.set_xalign(0)
+        controls.append(title)
+
+        help_text = Gtk.Label(
+            label=(
+                "Search all installed sources for equivalent titles. "
+                "Optional query filters: src:<source-name> and id:<source-id>."
+            )
+        )
+        help_text.add_css_class("dim-label")
+        help_text.set_wrap(True)
+        help_text.set_xalign(0)
+        controls.append(help_text)
+
+        self._migrate_reference_entry = Gtk.Entry()
+        self._migrate_reference_entry.set_placeholder_text("Reference title (optional)")
+        controls.append(self._migrate_reference_entry)
+
+        query_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        self._migrate_query_entry = Gtk.SearchEntry()
+        self._migrate_query_entry.set_placeholder_text("Search query (supports src: and id:)")
+        self._migrate_query_entry.set_hexpand(True)
+        self._migrate_query_entry.connect("activate", self._start_migrate_search)
+        query_row.append(self._migrate_query_entry)
+
+        self._migrate_search_btn = Gtk.Button(label="Search Sources")
+        self._migrate_search_btn.add_css_class("suggested-action")
+        self._migrate_search_btn.connect("clicked", self._start_migrate_search)
+        query_row.append(self._migrate_search_btn)
+        controls.append(query_row)
+
+        self._migrate_status_label = Gtk.Label(label="Ready to search")
+        self._migrate_status_label.add_css_class("dim-label")
+        self._migrate_status_label.set_xalign(0)
+        controls.append(self._migrate_status_label)
+
+        root.append(controls)
+        root.append(Gtk.Separator())
+
+        self._migrate_stack = Gtk.Stack()
+        self._migrate_stack.set_vexpand(True)
+        self._migrate_stack.set_transition_type(Gtk.StackTransitionType.CROSSFADE)
+
+        self._migrate_loading = LoadingSpinner("Searching installed sources...")
+        self._migrate_stack.add_named(self._migrate_loading, "loading")
+
+        self._migrate_empty = EmptyState(
+            "system-search-symbolic",
+            "No results yet",
+            "Search all sources to find a migration target",
+        )
+        self._migrate_stack.add_named(self._migrate_empty, "empty")
+
+        self._migrate_results_list = Gtk.ListBox()
+        self._migrate_results_list.set_selection_mode(Gtk.SelectionMode.NONE)
+        self._migrate_results_list.add_css_class("boxed-list")
+        self._migrate_results_list.set_margin_start(16)
+        self._migrate_results_list.set_margin_end(16)
+        self._migrate_results_list.set_margin_top(16)
+        self._migrate_results_list.set_margin_bottom(16)
+        migrate_scroll = Gtk.ScrolledWindow()
+        migrate_scroll.set_vexpand(True)
+        migrate_scroll.set_child(self._migrate_results_list)
+        self._migrate_stack.add_named(migrate_scroll, "results")
+
+        self._migrate_stack.set_visible_child_name("empty")
+        root.append(self._migrate_stack)
+        return root
+
+    def _start_migrate_search(self, *_):
+        if self._migrate_searching:
+            return
+
+        raw_query = self._migrate_query_entry.get_text().strip()
+        reference_query = self._migrate_reference_entry.get_text().strip()
+        query, src_filter, id_filter = self._parse_migrate_query(raw_query)
+        if not query:
+            query = reference_query
+        if not query:
+            self._migrate_empty.set_title("Query required")
+            self._migrate_status_label.set_text("Enter a title or search term to find migration candidates.")
+            self._migrate_stack.set_visible_child_name("empty")
+            return
+
+        sources = self._filter_sources_for_migrate(src_filter, id_filter)
+        if not sources:
+            self._migrate_empty.set_title("No matching sources")
+            self._migrate_status_label.set_text("No installed source matched the src:/id: filters.")
+            self._migrate_stack.set_visible_child_name("empty")
+            return
+
+        self._migrate_searching = True
+        self._migrate_search_btn.set_sensitive(False)
+        self._migrate_status_label.set_text(f"Searching {len(sources)} sources...")
+        self._migrate_stack.set_visible_child_name("loading")
+
+        def run():
+            results = []
+            errors = []
+            total = len(sources)
+
+            for idx, ext in enumerate(sources, start=1):
+                GLib.idle_add(
+                    self._migrate_status_label.set_text,
+                    f"Searching {idx}/{total}: {ext.name}",
+                )
+                try:
+                    mangas, _has_next = ext.search(SearchFilter(query=query), page=1)
+                    for manga in mangas[:20]:
+                        if not manga.source_id:
+                            manga.source_id = ext.id
+                        if not manga.source_manga_id:
+                            manga.source_manga_id = manga.url or manga.title
+                        results.append((ext, manga))
+                except Exception as e:
+                    errors.append(f"{ext.name}: {e}")
+
+            deduped = []
+            seen = set()
+            for ext, manga in results:
+                key = (
+                    manga.source_id or ext.id,
+                    manga.source_manga_id or manga.url or manga.title.lower(),
+                )
+                if key in seen:
+                    continue
+                seen.add(key)
+                deduped.append((ext, manga))
+
+            deduped.sort(key=lambda item: (item[1].title or "").lower())
+            GLib.idle_add(self._on_migrate_search_done, deduped, errors, query)
+
+        threading.Thread(target=run, daemon=True).start()
+
+    def _on_migrate_search_done(self, results, errors, query):
+        self._migrate_searching = False
+        self._migrate_search_btn.set_sensitive(True)
+        self._clear_migrate_results()
+
+        if not results:
+            self._migrate_empty.set_title("No migration matches")
+            self._migrate_status_label.set_text(f"No source returned matches for '{query}'.")
+            self._migrate_stack.set_visible_child_name("empty")
+            return
+
+        for ext, manga in results:
+            row = Adw.ActionRow(title=manga.title or "Untitled")
+            bits = [ext.name]
+            if manga.author:
+                bits.append(manga.author)
+            row.set_subtitle("  •  ".join(bits))
+
+            open_btn = Gtk.Button(icon_name="go-next-symbolic")
+            open_btn.add_css_class("flat")
+            open_btn.set_tooltip_text("Open details")
+            open_btn.connect("clicked", lambda *_btn, m=manga: self._open_migrate_candidate(m))
+            row.add_suffix(open_btn)
+
+            add_btn = Gtk.Button(icon_name="list-add-symbolic")
+            add_btn.add_css_class("flat")
+            add_btn.set_tooltip_text("Add to library")
+            add_btn.connect("clicked", lambda *_btn, m=manga: self._add_migrate_candidate_to_library(m))
+            row.add_suffix(add_btn)
+
+            row.set_activatable(True)
+            row.connect("activated", lambda _row, m=manga: self._open_migrate_candidate(m))
+            self._migrate_results_list.append(row)
+
+        if errors:
+            self._migrate_status_label.set_text(
+                f"Found {len(results)} results ({len(errors)} sources failed)."
+            )
+        else:
+            self._migrate_status_label.set_text(f"Found {len(results)} results.")
+        self._migrate_stack.set_visible_child_name("results")
+
+    def _open_migrate_candidate(self, manga):
+        if self._on_manga_selected:
+            self._on_manga_selected(manga)
+
+    def _add_migrate_candidate_to_library(self, manga):
+        try:
+            db = get_db()
+            manga_id = db.upsert_manga(manga)
+            db.add_to_library(manga_id)
+            manga.id = manga_id
+            manga.in_library = True
+            self._migrate_status_label.set_text(
+                f"Added '{manga.title}' to library. Open details to verify before removing old source."
+            )
+        except Exception as e:
+            self._migrate_status_label.set_text(f"Failed to add '{manga.title}': {e}")
+
+    def _clear_migrate_results(self):
+        child = self._migrate_results_list.get_first_child()
+        while child:
+            nxt = child.get_next_sibling()
+            self._migrate_results_list.remove(child)
+            child = nxt
+
+    @staticmethod
+    def _parse_migrate_query(raw_query: str):
+        src_filter = ""
+        id_filter = ""
+        terms = []
+        for token in raw_query.split():
+            lower = token.lower()
+            if lower.startswith("src:") and len(token) > 4:
+                src_filter = token[4:].strip().lower()
+            elif lower.startswith("id:") and len(token) > 3:
+                id_filter = token[3:].strip().lower()
+            else:
+                terms.append(token)
+        return " ".join(terms).strip(), src_filter, id_filter
+
+    @staticmethod
+    def _filter_sources_for_migrate(src_filter: str, id_filter: str):
+        sources = get_registry().get_all()
+        if id_filter:
+            sources = [ext for ext in sources if ext.id.lower() == id_filter]
+        if src_filter:
+            sources = [
+                ext for ext in sources
+                if src_filter in ext.name.lower() or src_filter in ext.id.lower()
+            ]
+        return sources
 
     def _load_extensions(self):
         """Populate the built-in and JVM extension lists."""
