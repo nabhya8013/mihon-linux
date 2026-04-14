@@ -17,6 +17,7 @@ class ExtensionRegistry:
 
     def __init__(self):
         self._extensions: Dict[str, Extension] = {}
+        self._jvm_loaded = False
         self._load_builtins()
 
     def _load_builtins(self):
@@ -30,6 +31,8 @@ class ExtensionRegistry:
 
     def load_jvm_extensions(self):
         """Load JVM-based Tachiyomi extensions via the bridge."""
+        if self._jvm_loaded:
+            return
         try:
             from .extension_manager import get_extension_manager
             manager = get_extension_manager()
@@ -37,6 +40,7 @@ class ExtensionRegistry:
             for proxy in proxies:
                 self._extensions[proxy.id] = proxy
                 logger.info(f"Registered JVM extension: {proxy.name}")
+            self._jvm_loaded = True
         except Exception as e:
             logger.error(f"Failed to load JVM extensions: {e}")
 

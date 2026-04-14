@@ -36,6 +36,8 @@ class ExtensionManager:
     def __init__(self):
         self._installed: Dict[str, dict] = {}  # jar_stem -> metadata
         self._proxies: Dict[str, JvmProxyExtension] = {}  # extension_id -> proxy
+        self._stem_to_proxy_ids: Dict[str, List[str]] = {}  # jar_stem -> [extension_id]
+        self._proxy_to_stem: Dict[str, str] = {}  # extension_id -> jar_stem
         self._bridge_started = False
         EXTENSIONS_DIR.mkdir(parents=True, exist_ok=True)
         self._load_metadata()
@@ -80,7 +82,6 @@ class ExtensionManager:
         ext_name = result.get("name", "Unknown")
         ext_version = result.get("version", "1.0")
 
-        # Save metadata
         stem = Path(jar_path).stem
         self._installed[stem] = {
             "jar_path": jar_path,
@@ -90,6 +91,9 @@ class ExtensionManager:
             "apk_path": apk_path,
         }
         self._save_metadata()
+
+        # Force reload for this stem in case it was previously cached.
+        self._clear_loaded_stem(stem)
 
         # Step 2: Load via bridge
         return self._load_extension(stem)
@@ -111,6 +115,10 @@ class ExtensionManager:
         meta = self._installed.get(stem)
         if not meta:
             return None
+
+        cached = self._get_cached_stem_proxies(stem)
+        if cached is not None:
+            return cached
 
         if not self._ensure_bridge():
             return None
@@ -138,6 +146,7 @@ class ExtensionManager:
             return None
 
         proxies = []
+        self._clear_loaded_stem(stem)
         for src in sources:
             ext_id = src.get("id", 0)
             proxy = JvmProxyExtension(
@@ -148,7 +157,9 @@ class ExtensionManager:
                 supports_latest=src.get("supportsLatest", False),
             )
             self._proxies[proxy.info.id] = proxy
+            self._proxy_to_stem[proxy.info.id] = stem
             proxies.append(proxy)
+        self._stem_to_proxy_ids[stem] = [proxy.info.id for proxy in proxies]
 
         logger.info(f"Loaded {len(proxies)} source(s) from {stem}")
         print(f"[ext_manager] Loaded {len(proxies)} source(s) from {stem}: {[p.name for p in proxies]}")
@@ -170,17 +181,33 @@ class ExtensionManager:
     # ── Uninstall ─────────────────────────────────────────────────────────
 
     def uninstall(self, stem: str) -> bool:
+        removed = self._remove_stem(stem, persist=True)
+        if removed:
+            logger.info(f"Uninstalled extension: {stem}")
+        return removed
+
+    def uninstall_by_extension_id(self, extension_id: str) -> bool:
+        stem = self._proxy_to_stem.get(extension_id)
+        if not stem:
+            return False
+        return self.uninstall(stem)
+
+    def _remove_stem(self, stem: str, persist: bool) -> bool:
         meta = self._installed.pop(stem, None)
         if not meta:
             return False
 
-        # Remove JAR file
+        self._clear_loaded_stem(stem)
+
         jar_path = meta.get("jar_path", "")
         if jar_path and os.path.exists(jar_path):
-            os.remove(jar_path)
+            try:
+                os.remove(jar_path)
+            except OSError as e:
+                logger.warning(f"Could not remove JAR for {stem}: {e}")
 
-        self._save_metadata()
-        logger.info(f"Uninstalled extension: {stem}")
+        if persist:
+            self._save_metadata()
         return True
 
     # ── Accessors ─────────────────────────────────────────────────────────
@@ -199,6 +226,24 @@ class ExtensionManager:
         if self._bridge_started:
             get_bridge().stop()
             self._bridge_started = False
+
+    def _get_cached_stem_proxies(self, stem: str) -> Optional[List[JvmProxyExtension]]:
+        proxy_ids = self._stem_to_proxy_ids.get(stem)
+        if not proxy_ids:
+            return None
+        proxies = []
+        for extension_id in proxy_ids:
+            proxy = self._proxies.get(extension_id)
+            if proxy is None:
+                return None
+            proxies.append(proxy)
+        return proxies
+
+    def _clear_loaded_stem(self, stem: str):
+        proxy_ids = self._stem_to_proxy_ids.pop(stem, [])
+        for extension_id in proxy_ids:
+            self._proxy_to_stem.pop(extension_id, None)
+            self._proxies.pop(extension_id, None)
 
 
 def get_extension_manager() -> ExtensionManager:
