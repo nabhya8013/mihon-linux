@@ -126,6 +126,7 @@ class Database:
             "page_layout": "single",
             "scale_type": "fit_page",
             "crop_borders": "0",
+            "auto_update_library": "1",
             "download_dir": str(DOWNLOADS_DIR),
             "max_simultaneous_downloads": "3",
             "tracker_anilist_token": "",

@@ -298,7 +298,7 @@ class BrowseView(Gtk.Box):
                 manager = get_extension_manager()
                 proxies = manager.install_from_apk(apk_path)
                 if proxies:
-                    # Register all proxies in the registry
+                    # Register only newly installed proxies; existing user-installed ones stay.
                     registry = get_registry()
                     for proxy in proxies:
                         registry.register(proxy)
@@ -338,7 +338,21 @@ class BrowseView(Gtk.Box):
     def _on_uninstall(self, extension_id: str):
         """Uninstall a JVM extension."""
         registry = get_registry()
-        registry.unregister(extension_id)
+        removed = False
+        try:
+            from ..extensions.extension_manager import get_extension_manager
+            manager = get_extension_manager()
+            removed = manager.uninstall_by_extension_id(extension_id)
+            if removed:
+                # Remove any stale JVM proxies no longer present in manager.
+                for ext in list(registry.get_all()):
+                    if ext.info.id.startswith("jvm_") and manager.get_proxy(ext.info.id) is None:
+                        registry.unregister(ext.info.id)
+        except Exception as e:
+            print(f"[browse] Uninstall error: {e}")
+
+        if not removed:
+            registry.unregister(extension_id)
         self._load_extensions()
         self._load_sources()
 

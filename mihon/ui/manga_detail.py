@@ -4,9 +4,10 @@ Manga detail view - shows manga info, chapter list, add to library.
 import gi
 gi.require_version("Gtk", "4.0")
 gi.require_version("Adw", "1")
-from gi.repository import Gtk, Adw, GLib, GdkPixbuf, Pango
+from gi.repository import Gtk, Adw, GLib, Gio, GdkPixbuf, Pango
 import threading
 import time
+from urllib.parse import urljoin
 from ..core.database import get_db
 from ..core.models import Manga, Chapter, ReadingStatus, DownloadStatus
 from ..core import image_loader
@@ -141,6 +142,8 @@ class MangaDetailView(Gtk.Box):
         web_btn.add_css_class("circular")
         web_btn.set_size_request(48, 48)
         web_btn.set_halign(Gtk.Align.CENTER)
+        web_btn.connect("clicked", self._open_web_view)
+        self._web_btn = web_btn
         web_box.append(web_btn)
         web_lbl = Gtk.Label(label="WebView")
         web_lbl.add_css_class("caption")
@@ -243,6 +246,7 @@ class MangaDetailView(Gtk.Box):
     def load_manga(self, manga: Manga):
         """Load and display a manga's details."""
         self._manga = manga
+        self._update_web_button_state()
         self._manga_title.set_text(manga.title)
         self._author_label.set_text(manga.author or "Unknown Author")
         self._status_label.set_markup(
@@ -327,10 +331,53 @@ class MangaDetailView(Gtk.Box):
 
     def _on_details_loaded(self, manga: Manga, chapters):
         self._manga = manga
+        self._update_web_button_state()
         self._chapters = chapters
         self._chapter_count_label.set_text(f"{len(chapters)} Chapters")
         self._render_chapters()
         self._update_library_button()
+
+    def _resolve_external_manga_url(self):
+        if not self._manga:
+            return None
+
+        raw_url = (self._manga.url or self._manga.source_manga_id or "").strip()
+        if not raw_url:
+            return None
+
+        if raw_url.startswith(("https://", "http://")):
+            return raw_url
+        if raw_url.startswith("//"):
+            return f"https:{raw_url}"
+
+        # Many JVM extensions return relative manga URLs; normalize against source base URL.
+        ext = get_registry().get(self._manga.source_id)
+        base_url = getattr(ext, "_base_url", "") if ext else ""
+        if base_url:
+            return urljoin(base_url.rstrip("/") + "/", raw_url.lstrip("/"))
+
+        return None
+
+    def _update_web_button_state(self):
+        if not hasattr(self, "_web_btn"):
+            return
+        url = self._resolve_external_manga_url()
+        if url:
+            self._web_btn.set_sensitive(True)
+            self._web_btn.set_tooltip_text(url)
+        else:
+            self._web_btn.set_sensitive(False)
+            self._web_btn.set_tooltip_text("No website URL available for this source")
+
+    def _open_web_view(self, *_):
+        url = self._resolve_external_manga_url()
+        if not url:
+            self._update_web_button_state()
+            return
+        try:
+            Gio.AppInfo.launch_default_for_uri(url, None)
+        except Exception as e:
+            print(f"[detail] Failed to open browser URL '{url}': {e}")
 
     def _render_chapters(self):
         # Clear
