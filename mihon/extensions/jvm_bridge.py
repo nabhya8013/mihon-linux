@@ -6,6 +6,12 @@ import os
 import time
 from typing import Dict, Any, Optional, Callable
 from concurrent.futures import Future
+from ..core.cookie_store import COOKIE_JAR_ENV, COOKIE_JAR_PATH
+from ..core.challenge_bridge import (
+    CHALLENGE_DIR_ENV,
+    get_challenge_bridge,
+    start_challenge_bridge,
+)
 
 logger = logging.getLogger("jvm_bridge")
 
@@ -75,6 +81,9 @@ class JVMBridgeManager:
 
                 env = os.environ.copy()
                 env["JAVA_HOME"] = java_home
+                env[COOKIE_JAR_ENV] = str(COOKIE_JAR_PATH)
+                start_challenge_bridge()
+                env[CHALLENGE_DIR_ENV] = str(get_challenge_bridge().directory)
 
                 self.process = subprocess.Popen(
                     [java_bin, "-jar", self.jar_path],

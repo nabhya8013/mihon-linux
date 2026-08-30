@@ -6,9 +6,9 @@ CDN base: https://aln.youtube-anime.com/ (thumbnails and pages)
 API: https://api.allanime.day/api (GraphQL, POST or GET)
 """
 import re
-import requests
 from typing import List, Tuple, Optional
 from .base import Extension
+from ..core.http_client import create_http_session
 from ..core.models import Manga, Chapter, Page, SearchFilter, ExtensionInfo
 
 
@@ -17,7 +17,6 @@ CDN_URL = "https://aln.youtube-anime.com/"
 SITE_URL = "https://allmanga.to"
 
 HEADERS = {
-    "User-Agent": "Mozilla/5.0 (X11; Linux x86_64; rv:120.0) Gecko/20100101 Firefox/120.0",
     "Referer": SITE_URL,
     "Origin": SITE_URL,
     "Content-Type": "application/json",
@@ -99,8 +98,7 @@ query($mangaId: String!, $translationType: VaildTranslationTypeMangaEnumType!, $
 class AllMangaExtension(Extension):
 
     def __init__(self):
-        self._session = requests.Session()
-        self._session.headers.update(HEADERS)
+        self._session = create_http_session(HEADERS)
         self._translation_type = "sub"  # sub or raw
 
     @property

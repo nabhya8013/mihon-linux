@@ -7,11 +7,13 @@ gi.require_version("Gtk", "4.0")
 gi.require_version("Adw", "1")
 from gi.repository import Gtk, Adw, GLib, GObject
 from ..core.models import Manga, Chapter
+from ..core.http_client import set_challenge_solver
 from .library import LibraryView
 from .browse import BrowseView, SourceCatalogView
 from .updates import UpdatesView
 from .manga_detail import MangaDetailView
 from .reader import ReaderView
+from .challenge_solver import WebKitCookieSolver
 
 
 class MainWindow(Adw.ApplicationWindow):
@@ -24,6 +26,8 @@ class MainWindow(Adw.ApplicationWindow):
 
         self._navigation_stack = []  # For back navigation
         self._build_ui()
+        self._challenge_solver = WebKitCookieSolver(self)
+        set_challenge_solver(self._challenge_solver.solve)
 
     def _build_ui(self):
         # The root is a NavigationView to handle pushing/popping pages

@@ -5,26 +5,24 @@ Fetches images in background threads and loads them as GdkPixbuf.
 import threading
 import os
 import hashlib
-import requests
 from pathlib import Path
 from typing import Callable, Optional
 from gi.repository import GLib, GdkPixbuf, Gio
 from .database import COVERS_DIR
+from .http_client import create_http_session
 
 
 # In-memory cache: url -> GdkPixbuf
 _pixbuf_cache: dict = {}
 _cache_lock = threading.Lock()
 
-SESSION = requests.Session()
-SESSION.headers.update({
-    "User-Agent": "Mozilla/5.0 (X11; Linux x86_64; rv:120.0) Gecko/20100101 Firefox/120.0",
-})
+SESSION = create_http_session()
 
 # Map URL domains to their correct Referer headers
 _REFERER_MAP = {
     "mangadex.org": "https://mangadex.org",
     "uploads.mangadex.org": "https://mangadex.org",
+    "mangadex.network": "https://mangadex.org",
     "allmanga.to": "https://allmanga.to",
     "allanime.day": "https://allmanga.to",
     "aln.youtube-anime.com": "https://allmanga.to",

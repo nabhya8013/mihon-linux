@@ -33,6 +33,15 @@ class MihonApp(Adw.Application):
             display, provider, Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION
         )
 
+        # Start the JVM ↔ Python challenge handshake watcher so that
+        # Cloudflare blocks raised inside bridge OkHttp requests can
+        # be solved by the same WebKit UI used for Python requests.
+        try:
+            from .core.challenge_bridge import start_challenge_bridge
+            start_challenge_bridge()
+        except Exception as exc:  # pragma: no cover - best effort
+            print(f"[mihon] Could not start challenge bridge: {exc}", file=sys.stderr)
+
     def _on_activate(self, app):
         try:
             win = MainWindow(app=self)

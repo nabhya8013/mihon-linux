@@ -108,6 +108,20 @@ class Database:
             FOREIGN KEY(chapter_id) REFERENCES chapters(id) ON DELETE CASCADE
         );
 
+        CREATE TABLE IF NOT EXISTS manga_tracking (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            manga_id INTEGER NOT NULL,
+            provider TEXT NOT NULL,
+            status TEXT DEFAULT '',
+            progress REAL DEFAULT 0,
+            score REAL DEFAULT 0,
+            url TEXT DEFAULT '',
+            note TEXT DEFAULT '',
+            last_synced_at REAL,
+            UNIQUE(manga_id, provider),
+            FOREIGN KEY(manga_id) REFERENCES manga(id) ON DELETE CASCADE
+        );
+
         CREATE TABLE IF NOT EXISTS settings (
             key TEXT PRIMARY KEY,
             value TEXT NOT NULL
@@ -116,6 +130,7 @@ class Database:
         CREATE INDEX IF NOT EXISTS idx_manga_library ON manga(in_library);
         CREATE INDEX IF NOT EXISTS idx_chapters_manga ON chapters(manga_id);
         CREATE INDEX IF NOT EXISTS idx_history_manga ON history(manga_id);
+        CREATE INDEX IF NOT EXISTS idx_tracking_manga ON manga_tracking(manga_id);
         """)
         c.commit()
 
@@ -126,6 +141,11 @@ class Database:
             "page_layout": "single",
             "scale_type": "fit_page",
             "crop_borders": "0",
+            "reader_tap_invert": "0",
+            "reader_fullscreen": "0",
+            "reader_keep_screen_on": "0",
+            "reader_show_slider": "1",
+            "reader_zoom": "1.0",
             "download_dir": str(DOWNLOADS_DIR),
             "max_simultaneous_downloads": "3",
             "tracker_anilist_token": "",
@@ -383,6 +403,13 @@ class Database:
             )
         self.conn.commit()
 
+    def clear_chapter_download(self, chapter_id: int):
+        self.conn.execute(
+            "UPDATE chapters SET download_status=?, local_path=NULL WHERE id=?",
+            (DownloadStatus.NOT_DOWNLOADED.value, chapter_id),
+        )
+        self.conn.commit()
+
     def get_downloaded_manga_ids(self, manga_ids: List[int]) -> set[int]:
         if not manga_ids:
             return set()
@@ -454,6 +481,21 @@ class Database:
         ).fetchone()
         return row["id"]
 
+    def update_category_name(self, category_id: int, name: str):
+        self.conn.execute(
+            "UPDATE categories SET name=? WHERE id=?",
+            (name, category_id),
+        )
+        self.conn.commit()
+
+    def reorder_categories(self, ordered_category_ids: List[int]):
+        for idx, category_id in enumerate(ordered_category_ids):
+            self.conn.execute(
+                "UPDATE categories SET sort_order=? WHERE id=?",
+                (idx, category_id),
+            )
+        self.conn.commit()
+
     def delete_category(self, category_id: int):
         self.conn.execute("DELETE FROM categories WHERE id=?", (category_id,))
         self.conn.commit()
@@ -468,6 +510,123 @@ class Database:
                 (manga_id, cat_id)
             )
         self.conn.commit()
+
+    def get_manga_category_ids(self, manga_id: int) -> List[int]:
+        rows = self.conn.execute(
+            "SELECT category_id FROM manga_categories WHERE manga_id=? ORDER BY category_id",
+            (manga_id,),
+        ).fetchall()
+        return [r["category_id"] for r in rows]
+
+    def copy_manga_categories(self, source_manga_id: int, target_manga_id: int):
+        category_ids = self.get_manga_category_ids(source_manga_id)
+        if category_ids:
+            self.set_manga_categories(target_manga_id, category_ids)
+
+    def add_manga_to_category_bulk(self, manga_ids: List[int], category_id: int) -> int:
+        if not manga_ids:
+            return 0
+        cur = self.conn.cursor()
+        before = self.conn.total_changes
+        for manga_id in manga_ids:
+            cur.execute(
+                "INSERT OR IGNORE INTO manga_categories(manga_id, category_id) VALUES(?,?)",
+                (manga_id, category_id),
+            )
+        self.conn.commit()
+        return self.conn.total_changes - before
+
+    def remove_manga_from_category_bulk(self, manga_ids: List[int], category_id: int) -> int:
+        if not manga_ids:
+            return 0
+        placeholders = ",".join("?" for _ in manga_ids)
+        cur = self.conn.execute(
+            f"DELETE FROM manga_categories WHERE category_id=? AND manga_id IN ({placeholders})",
+            (category_id, *manga_ids),
+        )
+        self.conn.commit()
+        return cur.rowcount
+
+    # ── Tracking ───────────────────────────────────────────────────────────
+
+    def get_manga_tracking(self, manga_id: int) -> List[dict]:
+        rows = self.conn.execute(
+            """
+            SELECT provider, status, progress, score, url, note, last_synced_at
+            FROM manga_tracking
+            WHERE manga_id=?
+            ORDER BY provider
+            """,
+            (manga_id,),
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+    def upsert_manga_tracking(
+        self,
+        manga_id: int,
+        provider: str,
+        status: str = "",
+        progress: float = 0.0,
+        score: float = 0.0,
+        url: str = "",
+        note: str = "",
+    ):
+        self.conn.execute(
+            """
+            INSERT INTO manga_tracking(
+                manga_id, provider, status, progress, score, url, note, last_synced_at
+            ) VALUES(?,?,?,?,?,?,?,?)
+            ON CONFLICT(manga_id, provider) DO UPDATE SET
+                status=excluded.status,
+                progress=excluded.progress,
+                score=excluded.score,
+                url=excluded.url,
+                note=excluded.note,
+                last_synced_at=excluded.last_synced_at
+            """,
+            (manga_id, provider, status, progress, score, url, note, time.time()),
+        )
+        self.conn.commit()
+
+    def remove_manga_tracking(self, manga_id: int, provider: str):
+        self.conn.execute(
+            "DELETE FROM manga_tracking WHERE manga_id=? AND provider=?",
+            (manga_id, provider),
+        )
+        self.conn.commit()
+
+    def copy_chapter_progress_by_number(self, source_manga_id: int, target_manga_id: int):
+        source_rows = self.conn.execute(
+            """
+            SELECT chapter_number, read, last_page_read
+            FROM chapters
+            WHERE manga_id=?
+            """,
+            (source_manga_id,),
+        ).fetchall()
+        if not source_rows:
+            return
+        source_map = {r["chapter_number"]: (r["read"], r["last_page_read"] or 0) for r in source_rows}
+
+        target_rows = self.conn.execute(
+            """
+            SELECT id, chapter_number
+            FROM chapters
+            WHERE manga_id=?
+            """,
+            (target_manga_id,),
+        ).fetchall()
+        for row in target_rows:
+            chapter_number = row["chapter_number"]
+            if chapter_number not in source_map:
+                continue
+            read, last_page_read = source_map[chapter_number]
+            self.conn.execute(
+                "UPDATE chapters SET read=?, last_page_read=? WHERE id=?",
+                (read, last_page_read, row["id"]),
+            )
+        self.conn.commit()
+        self.update_unread_count(target_manga_id)
 
     # ── History ────────────────────────────────────────────────────────────
 

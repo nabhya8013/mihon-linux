@@ -7,9 +7,9 @@ REST API that requires no authentication for reading.
 """
 import re
 import time
-import requests
 from typing import List, Tuple, Optional
 from .base import Extension
+from ..core.http_client import create_http_session
 from ..core.models import Manga, Chapter, Page, SearchFilter, ExtensionInfo
 
 
@@ -18,7 +18,7 @@ COVER_BASE = "https://uploads.mangadex.org/covers"
 IMG_BASE = "https://uploads.mangadex.org"
 
 HEADERS = {
-    "User-Agent": "Mihon-Linux/1.0",
+    "Accept": "application/json",
 }
 
 MANGA_INCLUDES = ["cover_art", "author", "artist"]
@@ -30,8 +30,7 @@ ITEMS_PER_PAGE = 24
 class MangaDexExtension(Extension):
 
     def __init__(self):
-        self._session = requests.Session()
-        self._session.headers.update(HEADERS)
+        self._session = create_http_session(HEADERS)
         self._content_ratings = ["safe", "suggestive", "erotica"]
         self._language = "en"
 
@@ -353,7 +352,7 @@ class MangaDexExtension(Extension):
 
             pages.append(Page(
                 index=i,
-                url=full_url,
+                url=saver_url or full_url,
                 image_url=full_url,
             ))
 

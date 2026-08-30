@@ -59,8 +59,15 @@ Thumbs.db
 !bridge/gradle/wrapper/gradle-wrapper.jar
 bridge/gradle-*/
 bridge/*.zip
+graphify-out/
+.agent/
 
 # Data / Temp
 payload.json
 *.apk
 *.dex
+.kilo/kilo.jsonc
+port_parity_roadmap.md
+PORT_PARITY_IMPLEMENTATION_LOG.md
+.gitignore
+scripts/verify_slice5.sh

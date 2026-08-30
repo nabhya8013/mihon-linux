@@ -32,6 +32,8 @@ class LibraryView(Gtk.Box):
         self._all_manga = []
         self._filtered_manga = []
         self._downloaded_manga_ids = set()
+        self._categories = []
+        self._category_name_by_id = {}
         self._search_query = ""
         self._current_category = None  # None = All
         self._syncing_controls = False
@@ -77,6 +79,11 @@ class LibraryView(Gtk.Box):
         batch_btn.set_tooltip_text("Batch actions for filtered results")
         batch_btn.set_popover(self._build_batch_menu())
         header_box.append(batch_btn)
+
+        manage_categories_btn = Gtk.Button(label="Categories")
+        manage_categories_btn.set_tooltip_text("Manage categories")
+        manage_categories_btn.connect("clicked", self._open_category_manager)
+        header_box.append(manage_categories_btn)
 
         dl_btn = Gtk.Button(icon_name="folder-download-symbolic")
         dl_btn.set_tooltip_text("Show Downloads")
@@ -259,6 +266,18 @@ class LibraryView(Gtk.Box):
         remove_btn.connect("clicked", lambda *_: self._run_batch_remove_from_library(pop))
         box.append(remove_btn)
 
+        box.append(Gtk.Separator())
+
+        add_to_cat_btn = Gtk.Button(label="Add Filtered to Current Category")
+        add_to_cat_btn.add_css_class("flat")
+        add_to_cat_btn.connect("clicked", lambda *_: self._run_batch_add_to_current_category(pop))
+        box.append(add_to_cat_btn)
+
+        remove_from_cat_btn = Gtk.Button(label="Remove Filtered from Current Category")
+        remove_from_cat_btn.add_css_class("flat")
+        remove_from_cat_btn.connect("clicked", lambda *_: self._run_batch_remove_from_current_category(pop))
+        box.append(remove_from_cat_btn)
+
         pop.set_child(box)
         return pop
 
@@ -278,6 +297,8 @@ class LibraryView(Gtk.Box):
     def _on_loaded(self, manga, categories, downloaded_ids):
         self._all_manga = manga
         self._downloaded_manga_ids = downloaded_ids
+        self._categories = categories
+        self._category_name_by_id = {c.id: c.name for c in categories}
         self._rebuild_category_tabs(categories)
         self._apply_filters()
 
@@ -390,6 +411,42 @@ class LibraryView(Gtk.Box):
 
         threading.Thread(target=run, daemon=True).start()
 
+    def _run_batch_add_to_current_category(self, popover):
+        popover.popdown()
+        if self._current_category is None:
+            self._set_info("Pick a category tab first, then run this batch action.")
+            return
+        manga_ids = [m.id for m in self._filtered_manga if m.id is not None]
+        if not manga_ids:
+            self._set_info("Batch category add skipped: no filtered manga.")
+            return
+        category_name = self._category_name_by_id.get(self._current_category, "category")
+        self._set_info(f"Adding filtered manga to '{category_name}'...")
+
+        def run():
+            self._db.add_manga_to_category_bulk(manga_ids, self._current_category)
+            GLib.idle_add(self._on_batch_done, f"Added filtered manga to '{category_name}'.")
+
+        threading.Thread(target=run, daemon=True).start()
+
+    def _run_batch_remove_from_current_category(self, popover):
+        popover.popdown()
+        if self._current_category is None:
+            self._set_info("Pick a category tab first, then run this batch action.")
+            return
+        manga_ids = [m.id for m in self._filtered_manga if m.id is not None]
+        if not manga_ids:
+            self._set_info("Batch category remove skipped: no filtered manga.")
+            return
+        category_name = self._category_name_by_id.get(self._current_category, "category")
+        self._set_info(f"Removing filtered manga from '{category_name}'...")
+
+        def run():
+            removed = self._db.remove_manga_from_category_bulk(manga_ids, self._current_category)
+            GLib.idle_add(self._on_batch_done, f"Removed {removed} manga-category links from '{category_name}'.")
+
+        threading.Thread(target=run, daemon=True).start()
+
     def _on_batch_done(self, message: str):
         self._set_info(message)
         self.reload()
@@ -472,6 +529,171 @@ class LibraryView(Gtk.Box):
             self._display_btn.set_icon_name("view-list-symbolic")
         else:
             self._display_btn.set_icon_name("view-grid-symbolic")
+
+    # ── Category management ───────────────────────────────────────────────
+
+    def _open_category_manager(self, *_):
+        root = self.get_root()
+        if not isinstance(root, Gtk.Window):
+            self._set_info("Unable to open category manager: no window context.")
+            return
+
+        dialog = Gtk.Dialog(title="Manage Categories", transient_for=root, modal=True)
+        dialog.set_default_size(520, 460)
+        dialog.add_button("Close", Gtk.ResponseType.CLOSE)
+        dialog.connect("response", lambda d, _r: d.close())
+
+        content = dialog.get_content_area()
+        content.set_margin_start(12)
+        content.set_margin_end(12)
+        content.set_margin_top(12)
+        content.set_margin_bottom(12)
+        wrap = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
+        content.append(wrap)
+
+        desc = Gtk.Label(label="Create, rename, reorder, and delete categories.")
+        desc.set_xalign(0)
+        desc.add_css_class("dim-label")
+        wrap.append(desc)
+
+        create_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        self._cat_new_entry = Gtk.Entry()
+        self._cat_new_entry.set_placeholder_text("New category name")
+        self._cat_new_entry.set_hexpand(True)
+        create_row.append(self._cat_new_entry)
+        create_btn = Gtk.Button(label="Add")
+        create_btn.add_css_class("suggested-action")
+        create_btn.connect("clicked", self._create_category_from_dialog)
+        create_row.append(create_btn)
+        wrap.append(create_row)
+
+        self._cat_dialog_status = Gtk.Label()
+        self._cat_dialog_status.set_xalign(0)
+        self._cat_dialog_status.add_css_class("dim-label")
+        wrap.append(self._cat_dialog_status)
+
+        self._cat_dialog_list = Gtk.ListBox()
+        self._cat_dialog_list.set_selection_mode(Gtk.SelectionMode.NONE)
+        self._cat_dialog_list.add_css_class("boxed-list")
+        cat_scroll = Gtk.ScrolledWindow()
+        cat_scroll.set_vexpand(True)
+        cat_scroll.set_child(self._cat_dialog_list)
+        wrap.append(cat_scroll)
+
+        self._refresh_category_manager_list()
+        dialog.present()
+
+    def _create_category_from_dialog(self, *_):
+        name = self._cat_new_entry.get_text().strip()
+        if not name:
+            self._set_cat_dialog_status("Category name is required.")
+            return
+        try:
+            self._db.create_category(name)
+            self._cat_new_entry.set_text("")
+            self._set_cat_dialog_status(f"Created category '{name}'.")
+            self.reload()
+            self._refresh_category_manager_list()
+        except Exception as e:
+            self._set_cat_dialog_status(f"Failed to create '{name}': {e}")
+
+    def _refresh_category_manager_list(self):
+        if not hasattr(self, "_cat_dialog_list"):
+            return
+        child = self._cat_dialog_list.get_first_child()
+        while child:
+            nxt = child.get_next_sibling()
+            self._cat_dialog_list.remove(child)
+            child = nxt
+
+        categories = self._db.get_categories()
+        for idx, cat in enumerate(categories):
+            row = Gtk.ListBoxRow()
+            row_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+            row_box.set_margin_start(8)
+            row_box.set_margin_end(8)
+            row_box.set_margin_top(6)
+            row_box.set_margin_bottom(6)
+
+            name_entry = Gtk.Entry()
+            name_entry.set_text(cat.name)
+            name_entry.set_hexpand(True)
+            row_box.append(name_entry)
+
+            save_btn = Gtk.Button(icon_name="document-save-symbolic")
+            save_btn.add_css_class("flat")
+            save_btn.set_tooltip_text("Rename")
+            save_btn.connect("clicked", lambda *_b, cid=cat.id, e=name_entry: self._rename_category_from_dialog(cid, e))
+            row_box.append(save_btn)
+
+            up_btn = Gtk.Button(icon_name="go-up-symbolic")
+            up_btn.add_css_class("flat")
+            up_btn.set_tooltip_text("Move Up")
+            up_btn.set_sensitive(idx > 0)
+            up_btn.connect("clicked", lambda *_b, cid=cat.id: self._move_category(cid, -1))
+            row_box.append(up_btn)
+
+            down_btn = Gtk.Button(icon_name="go-down-symbolic")
+            down_btn.add_css_class("flat")
+            down_btn.set_tooltip_text("Move Down")
+            down_btn.set_sensitive(idx < len(categories) - 1)
+            down_btn.connect("clicked", lambda *_b, cid=cat.id: self._move_category(cid, 1))
+            row_box.append(down_btn)
+
+            delete_btn = Gtk.Button(icon_name="user-trash-symbolic")
+            delete_btn.add_css_class("flat")
+            delete_btn.add_css_class("error")
+            delete_btn.set_tooltip_text("Delete")
+            delete_btn.connect("clicked", lambda *_b, cid=cat.id, name=cat.name: self._delete_category_from_dialog(cid, name))
+            row_box.append(delete_btn)
+
+            row.set_child(row_box)
+            self._cat_dialog_list.append(row)
+
+    def _rename_category_from_dialog(self, category_id, entry: Gtk.Entry):
+        name = entry.get_text().strip()
+        if not name:
+            self._set_cat_dialog_status("Category name is required.")
+            return
+        try:
+            self._db.update_category_name(category_id, name)
+            self._set_cat_dialog_status(f"Renamed category to '{name}'.")
+            self.reload()
+            self._refresh_category_manager_list()
+        except Exception as e:
+            self._set_cat_dialog_status(f"Failed to rename category: {e}")
+
+    def _move_category(self, category_id, direction: int):
+        categories = self._db.get_categories()
+        ids = [c.id for c in categories]
+        if category_id not in ids:
+            return
+        idx = ids.index(category_id)
+        new_idx = idx + direction
+        if new_idx < 0 or new_idx >= len(ids):
+            return
+        ids[idx], ids[new_idx] = ids[new_idx], ids[idx]
+        self._db.reorder_categories(ids)
+        self._set_cat_dialog_status("Updated category order.")
+        self.reload()
+        self._refresh_category_manager_list()
+
+    def _delete_category_from_dialog(self, category_id, category_name: str):
+        try:
+            self._db.delete_category(category_id)
+            if self._current_category == category_id:
+                self._current_category = None
+                self._prefs = self._load_preferences_for_category(None)
+                self._sync_controls_from_prefs()
+            self._set_cat_dialog_status(f"Deleted category '{category_name}'.")
+            self.reload()
+            self._refresh_category_manager_list()
+        except Exception as e:
+            self._set_cat_dialog_status(f"Failed to delete '{category_name}': {e}")
+
+    def _set_cat_dialog_status(self, message: str):
+        if hasattr(self, "_cat_dialog_status"):
+            self._cat_dialog_status.set_text(message)
 
     def _prefs_key_for_category(self, category_id):
         if category_id is None:
