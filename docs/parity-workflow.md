@@ -2,6 +2,26 @@
 
 This document defines the implementation workflow for closing UI gaps with Mihon Android.
 
+Related docs:
+- Per-feature strategic roadmap and priority order: `port_parity_roadmap.md` (repo root, local-only).
+- Library controls behavior contract: [`specs/library-controls.md`](specs/library-controls.md).
+
+## Progress
+
+| Epic | Status |
+|---|---|
+| 1) Browse Parity | Partial — Sources + Migrate tab shipped (`src:`/`id:` queries); async global search and an Extensions/repo surface pending |
+| 2) Advanced Library Controls | **Done** — `4ad2f20` |
+| 3) Category Management UI | **Done** — `e3451e3` |
+| 4) Manga Detail Parity | Partial — detail, chapter list, and a manual tracking form exist; tracker OAuth/auto-sync and chapter batch actions pending |
+| 5) Reader Advanced Settings | Partial — paged + webtoon, persisted direction/layout/scale/crop-borders; tap-zone and per-mode depth pending |
+| 6) Smart Updates and Upcoming | Not started — manual Updates tab only |
+| 7) Download Manager Parity | Partial — `DownloadManager` core exists; queue-management UI (pause/resume/reorder/retry) pending |
+| 8) Full Settings Parity | Partial — single More panel with grouped rows; dedicated screens, `.tachibk` export, backup/restore screen pending |
+
+Sprint 0 (anti-bot) and `.tachibk` import are tracked separately in
+`PORT_PARITY_IMPLEMENTATION_LOG.md` (repo root, local-only) — all shipped.
+
 ## Core Delivery Pattern (Use For Every Epic)
 
 1. Define scope: finalize screens, interactions, and non-goals for the epic.
@@ -11,7 +31,7 @@ This document defines the implementation workflow for closing UI gaps with Mihon
 5. Wire state and async flows (loading, empty, error, retry).
 6. Persist settings/state and verify restore on restart.
 7. Add tests (unit/integration where practical) plus manual QA checklist.
-8. Ship behind a feature flag; remove flag after validation pass.
+8. Validate, then merge to `main`.
 
 ## Epic Workflows
 
@@ -136,20 +156,9 @@ Goal: Expand `More/Settings` into Android-like settings coverage.
 Done when:
 - Settings are comprehensive, structured, and safely recoverable.
 
-## Execution Order (Recommended)
+## Execution Order
 
-1. Advanced Library Controls
-2. Category Management UI
-3. Reader Advanced Settings
-4. Download Manager Parity
-5. Browse Parity
-6. Manga Detail Parity
-7. Smart Updates and Upcoming
-8. Full Settings Parity
-
-## Review Checklist
-
-1. Are epic goals correct and complete?
-2. Is execution order aligned with your priority?
-3. Any epics to split further before implementation?
-4. Any parity items you want explicitly out of scope for v1?
+The authoritative priority order lives in `port_parity_roadmap.md`
+("Revised Priority Order" / "Recommended sprint plan"), which sequences these UI
+epics alongside the anti-bot, backup, and tracking work. Follow that order rather
+than a separate list here.

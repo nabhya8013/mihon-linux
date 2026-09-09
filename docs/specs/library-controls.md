@@ -1,6 +1,11 @@
-# Library Controls Spec (Epic 2 - Initial Freeze)
+# Library Controls Spec
 
-This is the initial behavior contract for advanced library controls.
+Behavior contract for advanced library controls.
+
+**Status:** implemented — `4ad2f20` (controls, display modes, batch actions,
+persistent per-category preferences) and `e3451e3` (category management).
+State engine: `mihon/ui/library_state.py` (`LibraryPreferences`,
+`apply_library_preferences()`).
 
 ## Sort Options
 
@@ -58,6 +63,7 @@ Preference schema:
 
 ## Non-goals (This Slice)
 
-- Drag-drop category management
 - Custom filter presets
 - True multi-select with undo stack
+
+Category management (create/edit/delete/assign) shipped separately in `e3451e3`.
