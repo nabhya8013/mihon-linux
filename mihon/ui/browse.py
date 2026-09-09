@@ -188,12 +188,178 @@ class BrowseView(Gtk.Box):
         jvm_group.add(self._jvm_list)
 
         self._jvm_empty = Adw.ActionRow(title="No extensions installed")
-        self._jvm_empty.set_subtitle("Use 'Install from file' above to add Tachiyomi APK extensions")
+        self._jvm_empty.set_subtitle("Browse the catalog below or install an APK from file")
         self._jvm_list.append(self._jvm_empty)
+
+        # ── Available (from configured extension repos) ────────────────────
+        available_group = Adw.PreferencesGroup(title="Available")
+        available_group.set_description(
+            "Extensions published by your configured repositories"
+        )
+        box.append(available_group)
+
+        controls = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        controls.set_margin_bottom(8)
+
+        self._repo_search = Gtk.SearchEntry()
+        self._repo_search.set_placeholder_text("Search available extensions…")
+        self._repo_search.set_hexpand(True)
+        self._repo_search.connect("search-changed", lambda *_: self._render_available())
+        controls.append(self._repo_search)
+
+        self._repo_refresh_btn = Gtk.Button(icon_name="view-refresh-symbolic")
+        self._repo_refresh_btn.add_css_class("flat")
+        self._repo_refresh_btn.set_tooltip_text("Refresh extension catalog")
+        self._repo_refresh_btn.connect("clicked", lambda *_: self._load_available(force=True))
+        controls.append(self._repo_refresh_btn)
+        available_group.add(controls)
+
+        self._repo_status = Gtk.Label(label="Loading extension catalog…")
+        self._repo_status.add_css_class("dim-label")
+        self._repo_status.set_xalign(0)
+        self._repo_status.set_margin_bottom(4)
+        available_group.add(self._repo_status)
+
+        self._available_list = Gtk.ListBox()
+        self._available_list.set_selection_mode(Gtk.SelectionMode.NONE)
+        self._available_list.add_css_class("boxed-list")
+        available_group.add(self._available_list)
+
+        self._repo_entries = []
+        self._repo_loading = False
 
         scroll.set_child(box)
         self._load_extensions()
+        self._load_available()
         return scroll
+
+    # ── Extension catalog (remote repos) ──────────────────────────────────
+
+    #: Rendering every entry would build thousands of widgets; the list is a
+    #: search surface, not something anyone scrolls end to end.
+    MAX_AVAILABLE_ROWS = 60
+
+    def _load_available(self, force: bool = False):
+        """Fetch repo indexes on a background thread."""
+        if self._repo_loading:
+            return
+        self._repo_loading = True
+        self._repo_status.set_text("Loading extension catalog…")
+
+        def work():
+            try:
+                from ..extensions.repo_manager import get_repo_manager
+                entries = get_repo_manager().fetch_all(force=force)
+                GLib.idle_add(self._on_available_loaded, entries)
+            except Exception as e:
+                GLib.idle_add(self._on_available_error, str(e))
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def _on_available_loaded(self, entries):
+        self._repo_loading = False
+        self._repo_entries = entries
+        self._render_available()
+
+    def _on_available_error(self, message: str):
+        self._repo_loading = False
+        self._repo_entries = []
+        self._clear_list(self._available_list)
+        self._repo_status.set_text(f"Could not load catalog: {message}")
+
+    def _render_available(self):
+        self._clear_list(self._available_list)
+        if not self._repo_entries:
+            return
+
+        from ..extensions.repo_manager import get_repo_manager
+        installed = get_repo_manager().installed_versions()
+
+        query = self._repo_search.get_text().strip().lower()
+        matches = [
+            e for e in self._repo_entries
+            if not query
+            or query in e.display_name.lower()
+            or query in e.lang.lower()
+            or any(query in l.lower() for l in e.languages)
+        ]
+
+        updatable = sum(
+            1 for e in matches
+            if e.pkg in installed and e.version_code > installed[e.pkg]
+        )
+        shown = matches[: self.MAX_AVAILABLE_ROWS]
+
+        status = f"{len(matches)} extension(s)"
+        if len(matches) > len(shown):
+            status += f" — showing first {len(shown)}, refine your search"
+        if updatable:
+            status += f" • {updatable} update(s) available"
+        self._repo_status.set_text(status)
+
+        for entry in shown:
+            self._available_list.append(self._build_available_row(entry, installed))
+
+    def _build_available_row(self, entry, installed: dict) -> Adw.ActionRow:
+        row = Adw.ActionRow(title=entry.display_name)
+        langs = ", ".join(entry.languages[:4]).upper()
+        row.set_subtitle(f"v{entry.version} • {langs}")
+        row.add_prefix(Gtk.Image.new_from_icon_name("application-x-addon-symbolic"))
+
+        if entry.nsfw:
+            badge = Gtk.Label(label="18+")
+            badge.add_css_class("caption")
+            badge.add_css_class("error")
+            badge.set_valign(Gtk.Align.CENTER)
+            row.add_suffix(badge)
+
+        current = installed.get(entry.pkg)
+        if current is not None and entry.version_code > current:
+            label, css = "Update", "suggested-action"
+        elif current is not None:
+            label, css = "Reinstall", "flat"
+        else:
+            label, css = "Install", "flat"
+
+        button = Gtk.Button(label=label)
+        button.add_css_class(css)
+        button.set_valign(Gtk.Align.CENTER)
+        button.connect("clicked", self._on_install_from_repo, entry)
+        row.add_suffix(button)
+        return row
+
+    def _on_install_from_repo(self, button, entry):
+        button.set_sensitive(False)
+        button.set_label("Installing…")
+
+        def work():
+            try:
+                from ..extensions.extension_manager import get_extension_manager
+                proxies = get_extension_manager().install_from_repo(entry)
+                if proxies:
+                    registry = get_registry()
+                    for proxy in proxies:
+                        registry.register(proxy)
+                    GLib.idle_add(self._on_install_success, [entry.display_name])
+                else:
+                    GLib.idle_add(
+                        self._on_install_error,
+                        f"{entry.display_name} could not be loaded",
+                    )
+            except Exception as e:
+                GLib.idle_add(self._on_install_error, str(e))
+            finally:
+                GLib.idle_add(self._render_available)
+
+        threading.Thread(target=work, daemon=True).start()
+
+    @staticmethod
+    def _clear_list(listbox: Gtk.ListBox):
+        child = listbox.get_first_child()
+        while child:
+            nxt = child.get_next_sibling()
+            listbox.remove(child)
+            child = nxt
 
     # ══════════════════════════════════════════════════════════════════════
     #  MIGRATE TAB
@@ -443,19 +609,8 @@ class BrowseView(Gtk.Box):
         """Populate the built-in and JVM extension lists."""
         registry = get_registry()
 
-        # Clear built-in list
-        child = self._builtin_list.get_first_child()
-        while child:
-            nxt = child.get_next_sibling()
-            self._builtin_list.remove(child)
-            child = nxt
-
-        # Clear JVM list
-        child = self._jvm_list.get_first_child()
-        while child:
-            nxt = child.get_next_sibling()
-            self._jvm_list.remove(child)
-            child = nxt
+        self._clear_list(self._builtin_list)
+        self._clear_list(self._jvm_list)
 
         has_jvm = False
         for ext in registry.get_all():
@@ -468,7 +623,7 @@ class BrowseView(Gtk.Box):
 
         if not has_jvm:
             self._jvm_empty = Adw.ActionRow(title="No extensions installed")
-            self._jvm_empty.set_subtitle("Use 'Install from file' above to add Tachiyomi APK extensions")
+            self._jvm_empty.set_subtitle("Browse the catalog below or install an APK from file")
             self._jvm_list.append(self._jvm_empty)
 
     def _add_builtin_extension_row(self, ext):
@@ -584,11 +739,25 @@ class BrowseView(Gtk.Box):
         print(f"[browse] Install error: {message}")
 
     def _on_uninstall(self, extension_id: str):
-        """Uninstall a JVM extension."""
-        registry = get_registry()
-        registry.unregister(extension_id)
+        """
+        Uninstall a JVM extension.
+
+        Unregistering alone only dropped it from the in-memory registry, so the
+        JAR and its metadata survived and the extension reappeared on the next
+        launch. Remove the installed files too.
+        """
+        from ..extensions.extension_manager import get_extension_manager
+
+        manager = get_extension_manager()
+        stem = manager.find_stem_for_extension_id(extension_id)
+        if stem:
+            manager.uninstall(stem)
+        get_registry().unregister(extension_id)
+
         self._load_extensions()
         self._load_sources()
+        if getattr(self, "_repo_entries", None):
+            self._render_available()
 
 
 class SourceCatalogView(Gtk.Box):

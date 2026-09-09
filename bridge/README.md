@@ -40,12 +40,16 @@ Debian/Ubuntu `/usr/lib/jvm/java-21-openjdk-amd64`.
 | `extension.details` | Full manga metadata |
 | `extension.chapters` | Chapter list for a manga |
 | `extension.pages` | Page image URLs for a chapter |
-| `extension.filters` | Source's `FilterList` (genre/sort/status UI model) |
+| `extension.filters` | Source's `FilterList`, fully serialized (Select/Sort values, Group children) |
+| `extension.image` | Fetch a page image through the source's own client, so per-image headers, referers, rate limits and CF cookies apply |
+| `extension.preferences` | The source's preference screen, flattened to widget descriptors |
+| `extension.setPreference` | Persist one preference value back into the source |
+| `extension.unloadJar` | Unload just the sources that came from one JAR |
 | `system.ping` | Liveness — `{pong, timestamp}` |
 | `system.status` | Loaded-extension count, JVM version, memory |
 | `system.version` | Bridge / protocol / Java / Kotlin versions |
 
-Not yet implemented: `extension.preferences`, `extension.image`, `extension.login`.
+Not yet implemented: `extension.login` (auth-gated sources).
 
 ## Environment contract
 
@@ -67,8 +71,21 @@ Not yet implemented: `extension.preferences`, `extension.image`, `extension.logi
 `eu.kanade.tachiyomi.network` (Cloudflare + rate-limit interceptors) and source
 model/base classes under `eu.kanade.tachiyomi.source`.
 
-Known gaps: `android.text.format.DateFormat`, a `kotlin.coroutines` bridge for
-`suspend` source APIs.
+Dispatch goes through the **suspend** source API (`getPopularManga`,
+`getChapterList`, …) and through the newer combined `getMangaUpdate()` where a
+source implements it, falling back to the older RxJava `fetchX`/`chapterListParse`
+path only when the source genuinely does not implement the newer one. That single
+ordering covers both extension generations.
+
+Dependency versions are pinned to match what extensions are compiled against
+(okhttp 5.1.0, kotlinx-serialization 1.8.1, Kotlin 2.2.0). Mismatches do not fail
+the build — they surface at runtime as `AbstractMethodError` or `NoSuchMethodError`
+inside a source.
+
+Set `MIHON_HTTP_LOG=1` to log every extension HTTP request and response to stderr.
+
+Known gaps: `android.webkit.WebView`, `android.graphics` canvas APIs used by
+image-descrambling sources, and brotli/zstd response decoding.
 
 ## Tests
 
