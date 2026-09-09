@@ -56,6 +56,9 @@ class Manga:
     score: float = 0.0
     year: Optional[int] = None
     content_rating: str = "safe"
+    # Opaque per-source payload (Tachiyomi SManga.memo), round-tripped
+    # verbatim so API-driven sources can read it back when fetching chapters.
+    source_memo: str = ""
 
 
 @dataclass
@@ -112,6 +115,10 @@ class SearchFilter:
     status: str = ""
     sort_by: str = "relevance"
     content_rating: List[str] = field(default_factory=list)
+    # Source-defined filter state, shaped like the dicts Extension.get_filters()
+    # returns. Each entry keeps its positional 'index' so a source can map it
+    # back onto its own FilterList. Empty for sources without custom filters.
+    source_filters: List[dict] = field(default_factory=list)
 
 
 @dataclass

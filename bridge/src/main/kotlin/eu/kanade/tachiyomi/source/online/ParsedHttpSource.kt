@@ -98,5 +98,8 @@ abstract class ParsedHttpSource : HttpSource() {
         return imageUrlParse(response.asJsoup())
     }
 
-    protected open fun imageUrlParse(document: Document): String = ""
+    protected open fun imageUrlParse(document: Document): String =
+        throw UnsupportedOperationException(
+            "$name serves pages without an imageUrl but does not implement imageUrlParse(Document)"
+        )
 }

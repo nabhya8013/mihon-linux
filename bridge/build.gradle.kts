@@ -1,6 +1,6 @@
 plugins {
-    kotlin("jvm") version "1.9.22"
-    kotlin("plugin.serialization") version "1.9.22"
+    kotlin("jvm") version "2.2.0"
+    kotlin("plugin.serialization") version "2.2.0"
     application
 }
 
@@ -14,7 +14,7 @@ repositories {
 
 dependencies {
     // OkHttp & jsoup (used by extensions and our HttpSource stub)
-    implementation("com.squareup.okhttp3:okhttp:5.0.0-alpha.12")
+    implementation("com.squareup.okhttp3:okhttp:5.1.0")
     implementation("org.jsoup:jsoup:1.17.2")
 
     // Coroutines (for suspend-based extension API)
@@ -23,8 +23,16 @@ dependencies {
     // RxJava 1 (older tachiyomi extensions use rx.Observable)
     implementation("io.reactivex:rxjava:1.3.8")
 
+    // Rhino — real JS engine behind the app.cash.quickjs shim. Extensions that
+    // deobfuscate page URLs by evaluating site JavaScript need a working engine;
+    // the previous stub returned null and made those sources fail silently.
+    implementation("org.mozilla:rhino:1.7.15")
+    implementation("org.mozilla:rhino-engine:1.7.15")
+
     // Serialization (JSON-RPC wire format)
-    implementation("org.jetbrains.kotlinx:kotlinx-serialization-json:1.6.3")
+    implementation("org.jetbrains.kotlinx:kotlinx-serialization-json:1.8.1")
+    // Extensions decode responses straight off the okio BufferedSource.
+    implementation("org.jetbrains.kotlinx:kotlinx-serialization-json-okio:1.8.1")
 
     // Testing
     testImplementation(kotlin("test"))

@@ -21,24 +21,32 @@ class JvmProxyExtension(Extension):
     """
 
     def __init__(self, extension_id: int, name: str, lang: str,
-                 base_url: str = "", supports_latest: bool = False):
+                 base_url: str = "", supports_latest: bool = False,
+                 version: str = "1.0.0", nsfw: bool = False,
+                 has_settings: bool = False, package: str = "",
+                 jar_stem: str = ""):
         self._extension_id = extension_id
         self._name = name
         self._lang = lang
         self._base_url = base_url
         self._supports_latest = supports_latest
+        self._version = version
+        self._nsfw = nsfw
+        self._has_settings = has_settings
+        self._package = package
+        self.jar_stem = jar_stem
 
     @property
     def info(self) -> ExtensionInfo:
         return ExtensionInfo(
             id=f"jvm_{self._extension_id}",
             name=self._name,
-            version="1.0.0",
+            version=self._version,
             language=self._lang,
             description=f"{self._name} (JVM Extension)",
             installed=True,
-            has_settings=False,
-            nsfw=False,
+            has_settings=self._has_settings,
+            nsfw=self._nsfw,
         )
 
     # ── Bridge call helper ────────────────────────────────────────────────
@@ -74,10 +82,14 @@ class JvmProxyExtension(Extension):
 
     def search(self, filters: SearchFilter, page: int = 1) -> Tuple[List[Manga], bool]:
         try:
-            result = self._call("extension.search", {
-                "page": page,
-                "query": filters.query,
-            })
+            params = {"page": page, "query": filters.query}
+            # Source-defined filter state, as produced by get_filters() and edited
+            # by the catalog UI. Positional 'index' is how the bridge matches each
+            # entry back onto the source's own FilterList.
+            state = getattr(filters, "source_filters", None)
+            if state:
+                params["filters"] = state
+            result = self._call("extension.search", params)
             mangas = [self._to_manga(m) for m in result.get("mangas", [])]
             return mangas, result.get("hasNextPage", False)
         except BridgeError as e:
@@ -93,15 +105,21 @@ class JvmProxyExtension(Extension):
                 "manga": self._to_bridge_manga(manga),
             })
             updated = self._to_manga(result)
-            # Preserve library state
+            # Preserve library state and identity. Sources typically return a
+            # metadata-only object with no url, so falling back to the original
+            # keeps chapter fetching working.
             updated.id = manga.id
             updated.in_library = manga.in_library
             updated.reading_status = manga.reading_status
             updated.added_at = manga.added_at
+            updated.url = updated.url or manga.url
+            updated.source_manga_id = updated.source_manga_id or manga.source_manga_id
+            updated.title = updated.title or manga.title
+            updated.cover_url = updated.cover_url or manga.cover_url
+            updated.source_memo = updated.source_memo or manga.source_memo
             return updated
         except BridgeError as e:
             logger.error(f"[{self._name}] get_manga_details failed: {e}")
-            print(f"[jvm_proxy] get_manga_details failed for {self._name}: {e}")
             return manga
 
     def get_chapters(self, manga: Manga) -> List[Chapter]:
@@ -124,7 +142,6 @@ class JvmProxyExtension(Extension):
             return chapters
         except BridgeError as e:
             logger.error(f"[{self._name}] get_chapters failed: {e}")
-            print(f"[jvm_proxy] get_chapters failed for {self._name}: {e}")
             return []
 
     def get_pages(self, chapter: Chapter) -> List[Page]:
@@ -143,8 +160,76 @@ class JvmProxyExtension(Extension):
             return pages
         except BridgeError as e:
             logger.error(f"[{self._name}] get_pages failed: {e}")
-            print(f"[jvm_proxy] get_pages failed for {self._name}: {e}")
             return []
+
+    # ── Source-defined filters ────────────────────────────────────────────
+
+    def get_filters(self) -> List[dict]:
+        """
+        Return the source's own FilterList (genres, sort orders, status, ...).
+
+        Each entry carries a positional 'index' that must be echoed back in
+        SearchFilter.source_filters for the bridge to reapply the state.
+        """
+        try:
+            return self._call("extension.filters", timeout=15.0) or []
+        except BridgeError as e:
+            logger.error(f"[{self._name}] get_filters failed: {e}")
+            return []
+
+    # ── Image fetching ────────────────────────────────────────────────────
+
+    def fetch_image(self, image_url: str, page_url: str = "", index: int = 0) -> Optional[bytes]:
+        """
+        Fetch a page image through the source's own OkHttp client.
+
+        Sources that sign image URLs, require a per-image referer, or sit behind
+        Cloudflare cannot be fetched directly from Python — the extension's
+        interceptors and cookie jar only exist inside the bridge.
+        """
+        import base64
+
+        try:
+            result = self._call("extension.image", {
+                "imageUrl": image_url,
+                "pageUrl": page_url,
+                "index": index,
+            }, timeout=60.0)
+        except BridgeError as e:
+            logger.error(f"[{self._name}] fetch_image failed for {image_url}: {e}")
+            return None
+
+        data = (result or {}).get("data")
+        if not data:
+            return None
+        try:
+            return base64.b64decode(data)
+        except Exception as e:
+            logger.error(f"[{self._name}] could not decode image payload: {e}")
+            return None
+
+    # ── Per-source settings ───────────────────────────────────────────────
+
+    def has_settings(self) -> bool:
+        return self._has_settings
+
+    def get_settings(self) -> List[dict]:
+        """Return the source's preference screen, flattened to widget dicts."""
+        if not self._has_settings:
+            return []
+        try:
+            return self._call("extension.preferences", timeout=15.0) or []
+        except BridgeError as e:
+            logger.error(f"[{self._name}] get_settings failed: {e}")
+            return []
+
+    def save_settings(self, settings: dict):
+        """Persist changed preference values back into the source."""
+        for key, value in (settings or {}).items():
+            try:
+                self._call("extension.setPreference", {"key": key, "value": value}, timeout=15.0)
+            except BridgeError as e:
+                logger.error(f"[{self._name}] could not save preference {key}: {e}")
 
     # ── Converter ─────────────────────────────────────────────────────────
 
@@ -166,6 +251,8 @@ class JvmProxyExtension(Extension):
             "status": status_map.get(manga.status, 0),
             "thumbnailUrl": manga.cover_url,
             "initialized": True,
+            # Opaque source payload; sources read it back when fetching chapters.
+            "memo": manga.source_memo or None,
         }
 
     def _to_manga(self, data: dict) -> Manga:
@@ -192,6 +279,7 @@ class JvmProxyExtension(Extension):
         m.description = data.get("description", "")
         m.cover_url = data.get("thumbnailUrl", "")
         m.url = data.get("url", "")
+        m.source_memo = data.get("memo") or ""
 
         raw_status = data.get("status", 0)
         m.status = status_map.get(raw_status, "")

@@ -20,7 +20,13 @@ class ExtensionRegistry:
         self._load_builtins()
 
     def _load_builtins(self):
-        """Load built-in native Python extensions."""
+        """
+        Load built-in native Python extensions.
+
+        Kept deliberately small: MangaDex is the reference source that always
+        works out of the box. Everything else is meant to come from user-installed
+        Tachiyomi/Mihon APK extensions via the JVM bridge.
+        """
         for ext_class in [MangaDexExtension, AllMangaExtension]:
             try:
                 ext = ext_class()

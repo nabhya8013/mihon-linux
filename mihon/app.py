@@ -7,8 +7,12 @@ gi.require_version("Adw", "1")
 from gi.repository import Gtk, Adw, Gio, Gdk
 import sys
 import os
+import logging
+from .core.logging_setup import configure_logging
 from .ui.main_window import MainWindow
 from .ui.styles import CSS
+
+logger = logging.getLogger("app")
 
 
 class MihonApp(Adw.Application):
@@ -22,6 +26,8 @@ class MihonApp(Adw.Application):
         self.connect("startup", self._on_startup)
 
     def _on_startup(self, app):
+        configure_logging()
+
         # Load CSS only when a display exists.
         display = Gdk.Display.get_default()
         if display is None:
@@ -40,7 +46,7 @@ class MihonApp(Adw.Application):
             from .core.challenge_bridge import start_challenge_bridge
             start_challenge_bridge()
         except Exception as exc:  # pragma: no cover - best effort
-            print(f"[mihon] Could not start challenge bridge: {exc}", file=sys.stderr)
+            logger.warning("Could not start challenge bridge: %s", exc)
 
     def _on_activate(self, app):
         try:
@@ -53,7 +59,7 @@ class MihonApp(Adw.Application):
             win.present()
         except RuntimeError as e:
             # Avoid hard traceback spam when started without a GUI session.
-            print(f"[mihon] Failed to initialize GTK window: {e}", file=sys.stderr)
+            logger.error("Failed to initialize GTK window: %s", e)
             self.quit()
             return
 

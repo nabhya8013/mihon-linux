@@ -97,6 +97,7 @@ class CloudflareInterceptorTest {
             Request.Builder().url("https://example.test/protected").build(),
             responseCode = 403,
             responseBodies = listOf("blocked"),
+            retryResponseCode = 403,
         )
 
         val response = interceptor.intercept(chain)
@@ -149,7 +150,15 @@ class CloudflareInterceptorTest {
             cookieJar = cookieJar,
             timeoutMs = timeoutMs,
             pollIntervalMs = 10L,
-            sleeper = { ms -> fakeSleeperCalls.add(ms); Thread.sleep(ms) },
+            // The fake clock only advances when the interceptor sleeps. Without
+            // this the deadline check never fires and the "no solver response"
+            // case loops forever. The real sleep is capped so the polling loop
+            // still yields to the solver thread without costing wall-clock time.
+            sleeper = { ms ->
+                fakeSleeperCalls.add(ms)
+                fakeNow += ms
+                Thread.sleep(minOf(ms, 5L))
+            },
             clock = { fakeNow },
         )
     }
@@ -206,10 +215,17 @@ class CloudflareInterceptorTest {
         val userAgent: String,
     )
 
+    /**
+     * @param responseCode status returned for the first call.
+     * @param retryResponseCode status for every call after the first. Defaults
+     *   to 200 so a solved challenge actually unblocks; returning the blocked
+     *   code forever would make the retry indistinguishable from a failure.
+     */
     private class FakeChain(
         private val originalRequest: Request,
         private val responseCode: Int,
         responseBodies: List<String>,
+        private val retryResponseCode: Int = 200,
     ) : Interceptor.Chain {
         private val bodies = responseBodies
         val requests: MutableList<Request> = mutableListOf()
@@ -226,6 +242,7 @@ class CloudflareInterceptorTest {
         override fun proceed(request: Request): Response {
             callCount += 1
             val body = bodies.getOrNull(index) ?: ""
+            val code = if (index == 0) responseCode else retryResponseCode
             index += 1
             if (request !== originalRequest) {
                 requests.add(request)
@@ -233,7 +250,7 @@ class CloudflareInterceptorTest {
             return Response.Builder()
                 .request(request)
                 .protocol(Protocol.HTTP_1_1)
-                .code(responseCode)
+                .code(code)
                 .message("test")
                 .body(body.toResponseBody())
                 .build()

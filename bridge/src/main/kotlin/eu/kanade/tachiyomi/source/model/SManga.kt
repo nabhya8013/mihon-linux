@@ -1,5 +1,7 @@
 package eu.kanade.tachiyomi.source.model
 
+import kotlinx.serialization.json.JsonObject
+
 /**
  * Tachiyomi SManga interface stub.
  * Extensions create instances via SManga.create() and set properties.
@@ -16,12 +18,16 @@ interface SManga : java.io.Serializable {
     var update_strategy: UpdateStrategy
     var initialized: Boolean
 
+    /** Opaque per-source payload newer extensions round-trip with an entry. */
+    var memo: JsonObject?
+
     fun copyFrom(other: SManga) {
         if (other.author != null) author = other.author
         if (other.artist != null) artist = other.artist
         if (other.description != null) description = other.description
         if (other.genre != null) genre = other.genre
         if (other.thumbnail_url != null) thumbnail_url = other.thumbnail_url
+        if (other.memo != null) memo = other.memo
         status = other.status
         update_strategy = other.update_strategy
         if (!initialized) initialized = other.initialized
@@ -51,4 +57,5 @@ class SMangaImpl : SManga {
     override var thumbnail_url: String? = null
     override var update_strategy: UpdateStrategy = UpdateStrategy.ALWAYS_UPDATE
     override var initialized: Boolean = false
+    override var memo: JsonObject? = null
 }

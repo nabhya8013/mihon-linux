@@ -137,7 +137,32 @@ abstract class HttpSource : CatalogueSource {
 
     // ── Image ────────────────────────────────────────────────────────────
 
-    open fun imageUrlParse(response: Response): String = ""
+    /**
+     * Parses the second-stage response for sources that serve a page URL first
+     * and the image URL only after a follow-up request. Sources that need it
+     * must override; the default is only reached when `getPageList` already
+     * filled in `imageUrl`.
+     */
+    open fun imageUrlParse(response: Response): String =
+        throw UnsupportedOperationException(
+            "$name returned a page without an imageUrl but does not implement imageUrlParse()"
+        )
+
+    open fun imageUrlRequest(page: Page): Request {
+        return Request.Builder()
+            .url(baseUrl + page.url)
+            .headers(headers)
+            .build()
+    }
+
+    open fun fetchImageUrl(page: Page): Observable<String> {
+        return client.newCall(imageUrlRequest(page))
+            .asObservableSuccess()
+            .map { imageUrlParse(it) }
+    }
+
+    open suspend fun getImageUrl(page: Page): String =
+        fetchImageUrl(page).toBlocking().first()
 
     open fun imageRequest(page: Page): Request {
         return Request.Builder()
@@ -145,6 +170,35 @@ abstract class HttpSource : CatalogueSource {
             .headers(headers)
             .build()
     }
+
+    open fun fetchImage(page: Page): Observable<Response> {
+        return client.newCall(imageRequest(page)).asObservableSuccess()
+    }
+
+    open suspend fun getImage(page: Page): Response =
+        fetchImage(page).toBlocking().first()
+
+    /**
+     * Combined details + chapter fetch used by newer extensions-lib sources.
+     *
+     * Sources built against the new API override this and implement neither
+     * `chapterListParse` nor `getChapterList`; sources built against the old API
+     * do the reverse, which is what this default covers.
+     */
+    open suspend fun getMangaUpdate(
+        manga: SManga,
+        currentChapters: List<SChapter>,
+        fetchManga: Boolean,
+        fetchChapters: Boolean,
+    ): SMangaUpdate = SMangaUpdate(
+        manga = if (fetchManga) getMangaDetails(manga) else null,
+        chapters = if (fetchChapters) getChapterList(manga) else null,
+    )
+
+    /** Absolute, shareable URLs — used by "open in browser". */
+    open fun getMangaUrl(manga: SManga): String = baseUrl + manga.url
+
+    open fun getChapterUrl(chapter: SChapter): String = baseUrl + chapter.url
 
     /**
      * Stores a relative URL (which can later be used to rebuild the absolute URL).
