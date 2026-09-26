@@ -550,18 +550,24 @@ class MangaDetailView(Gtk.Box):
         self._update_library_button()
         self._refresh_tracking_summary()
 
-        # Load cover
-        url = manga.cover_local_path or manga.cover_url
-        if url:
+        # Load cover. cover_local_path is a filesystem path, not a URL - if it
+        # exists, read it directly rather than handing it to load_image_async,
+        # which would treat it as a URL and fail (a disk cache path has no
+        # scheme/host for curl to reject it on).
+        if manga.cover_local_path and GLib.file_test(manga.cover_local_path, GLib.FileTest.EXISTS):
+            pixbuf = image_loader.load_local_image(manga.cover_local_path, width=320, height=480)
+            if pixbuf:
+                self._on_cover_loaded(pixbuf)
+        elif manga.cover_url:
             image_loader.load_image_async(
-                url,
+                manga.cover_url,
                 self._on_cover_loaded,
                 width=320, height=480,  # Higher resolution for the blurred background
                 kind=disk_cache.KIND_COVER,
             )
             # Record where the cover landed so the library grid can read it
             # straight off disk instead of going back to the network.
-            self._remember_cover_path(manga, url)
+            self._remember_cover_path(manga, manga.cover_url)
 
         # Load details + chapters in background
         self._load_details()
