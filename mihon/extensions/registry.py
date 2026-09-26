@@ -6,6 +6,7 @@ from typing import Dict, List, Optional
 from .base import Extension
 from .allmanga import AllMangaExtension
 from .mangadex import MangaDexExtension
+from .mangafire import MangaFireExtension
 from ..core.models import ExtensionInfo
 
 import logging
@@ -23,16 +24,27 @@ class ExtensionRegistry:
         """
         Load built-in native Python extensions.
 
-        Kept deliberately small: MangaDex is the reference source that always
-        works out of the box. Everything else is meant to come from user-installed
-        Tachiyomi/Mihon APK extensions via the JVM bridge.
+        MangaDex is the reference source that always works out of the box.
+        Everything else beyond the listed built-ins is meant to come from
+        user-installed Tachiyomi/Mihon APK extensions via the JVM bridge.
         """
-        for ext_class in [MangaDexExtension, AllMangaExtension]:
+        for ext_class in [MangaDexExtension, AllMangaExtension, MangaFireExtension]:
             try:
                 ext = ext_class()
                 self._extensions[ext.id] = ext
             except Exception as e:
                 logger.error(f"Failed to load extension {ext_class.__name__}: {e}")
+
+        # The local source reads a folder on disk rather than a website, so it
+        # is registered separately and needs the database for its configured
+        # library path.
+        try:
+            from ..core.database import get_db
+            from .local import LocalSource
+            local = LocalSource(db=get_db())
+            self._extensions[local.id] = local
+        except Exception as e:
+            logger.error(f"Failed to load the local source: {e}")
 
     def load_jvm_extensions(self):
         """Load JVM-based Tachiyomi extensions via the bridge."""

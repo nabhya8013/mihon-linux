@@ -12,6 +12,9 @@ from typing import Dict, List, Optional, Callable
 from .database import get_db, DOWNLOADS_DIR
 from .http_client import create_http_session
 from .models import Manga, Chapter, Page, DownloadStatus, DownloadItem
+import logging
+
+logger = logging.getLogger("downloader")
 
 _REFERER_MAP = {
     "mangadex.org": "https://mangadex.org",
@@ -168,7 +171,7 @@ class DownloadManager:
                     if self._on_progress_cb:
                         self._on_progress_cb(chapter.id, downloaded, len(pages))
                 except Exception as e:
-                    print(f"[downloader] Failed page {page.index}: {e}")
+                    logger.warning("failed page %s: %s", page.index, e)
                     # Continue with remaining pages
                     downloaded += 1
 

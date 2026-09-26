@@ -16,6 +16,9 @@ gi.require_version("Adw", "1")
 from gi.repository import Gtk, Adw, GLib
 
 from ..core.http_client import ChallengeRequest, ChallengeSolution
+import logging
+
+logger = logging.getLogger("challenge_solver")
 
 
 def _load_webkit():
@@ -61,10 +64,10 @@ class WebKitCookieSolver:
 
     def solve(self, request: ChallengeRequest) -> Optional[ChallengeSolution]:
         if WEBKIT is None:
-            print("[challenge_solver] WebKitGTK 6.0 is not available.")
+            logger.warning("WebKitGTK 6.0 is not available")
             return None
         if threading.current_thread() is threading.main_thread():
-            print("[challenge_solver] Cannot block the GTK main thread for challenge solving.")
+            logger.warning("cannot block the GTK main thread for challenge solving")
             return None
 
         done = threading.Event()
@@ -189,5 +192,5 @@ class WebKitCookieSolver:
             elif hasattr(js_value, "get_js_value"):
                 cookie_string = js_value.get_js_value().to_string()
         except Exception as exc:
-            print(f"[challenge_solver] Cookie extraction failed: {exc}")
+            logger.error("cookie extraction failed: %s", exc)
         callback(cookie_string or "")

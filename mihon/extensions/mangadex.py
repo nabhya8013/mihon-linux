@@ -11,6 +11,9 @@ from typing import List, Tuple, Optional
 from .base import Extension
 from ..core.http_client import create_http_session
 from ..core.models import Manga, Chapter, Page, SearchFilter, ExtensionInfo
+import logging
+
+logger = logging.getLogger("mangadex")
 
 
 API_BASE = "https://api.mangadex.org"
@@ -168,7 +171,7 @@ class MangaDexExtension(Extension):
                 "offset": offset,
             })
         except Exception as e:
-            print(f"[mangadex] Popular error: {e}")
+            logger.error("popular error: %s", e)
             return [], False
 
         items = data.get("data") or []
@@ -189,7 +192,7 @@ class MangaDexExtension(Extension):
                 "offset": offset,
             })
         except Exception as e:
-            print(f"[mangadex] Latest error: {e}")
+            logger.error("latest error: %s", e)
             return [], False
 
         items = data.get("data") or []
@@ -219,7 +222,7 @@ class MangaDexExtension(Extension):
         try:
             data = self._get("/manga", params)
         except Exception as e:
-            print(f"[mangadex] Search error: {e}")
+            logger.error("search error: %s", e)
             return [], False
 
         items = data.get("data") or []
@@ -234,7 +237,7 @@ class MangaDexExtension(Extension):
                 "includes[]": MANGA_INCLUDES,
             })
         except Exception as e:
-            print(f"[mangadex] Detail error: {e}")
+            logger.error("detail error: %s", e)
             return manga
 
         item = data.get("data")
@@ -266,7 +269,7 @@ class MangaDexExtension(Extension):
                     "contentRating[]": self._content_ratings,
                 })
             except Exception as e:
-                print(f"[mangadex] Chapters error: {e}")
+                logger.error("chapters error: %s", e)
                 break
 
             items = data.get("data") or []
@@ -334,7 +337,7 @@ class MangaDexExtension(Extension):
         try:
             data = self._get(f"/at-home/server/{chapter_id}")
         except Exception as e:
-            print(f"[mangadex] Pages error: {e}")
+            logger.error("pages error: %s", e)
             return []
 
         base_url = data.get("baseUrl", "")
