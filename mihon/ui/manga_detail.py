@@ -45,6 +45,8 @@ class MangaDetailView(Gtk.Box):
         self._chapters = []
         self._chapter_filter_mode = "all"  # all | unread | read | downloaded
         self._chapter_query = ""
+        self._chapter_selection_mode = False
+        self._selected_chapter_ids = set()
         self._tracking_cache = {}
         self._db = get_db()
 
@@ -350,7 +352,58 @@ class MangaDetailView(Gtk.Box):
         batch_menu_btn.set_popover(self._build_chapter_batch_menu())
         ch_tools.append(batch_menu_btn)
 
+        self._select_toggle_btn = Gtk.ToggleButton(icon_name="object-select-symbolic")
+        self._select_toggle_btn.set_tooltip_text("Select chapters")
+        self._select_toggle_btn.connect("toggled", self._on_select_toggle)
+        ch_tools.append(self._select_toggle_btn)
+
         main_box.append(ch_tools)
+
+        # ── Selection action bar (shown only while selecting chapters) ─────
+        self._selection_bar = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        self._selection_bar.set_margin_start(16)
+        self._selection_bar.set_margin_end(16)
+        self._selection_bar.set_margin_bottom(6)
+        self._selection_bar.set_visible(False)
+
+        self._selection_count_label = Gtk.Label(label="0 selected")
+        self._selection_count_label.set_hexpand(True)
+        self._selection_count_label.set_xalign(0)
+        self._selection_count_label.add_css_class("dim-label")
+        self._selection_bar.append(self._selection_count_label)
+
+        sel_all_btn = Gtk.Button(label="All")
+        sel_all_btn.add_css_class("flat")
+        sel_all_btn.connect("clicked", self._on_select_all_clicked)
+        self._selection_bar.append(sel_all_btn)
+
+        sel_none_btn = Gtk.Button(label="None")
+        sel_none_btn.add_css_class("flat")
+        sel_none_btn.connect("clicked", self._on_select_none_clicked)
+        self._selection_bar.append(sel_none_btn)
+
+        sel_read_btn = Gtk.Button(label="Mark Read")
+        sel_read_btn.add_css_class("flat")
+        sel_read_btn.connect("clicked", self._on_selection_mark_read)
+        self._selection_bar.append(sel_read_btn)
+
+        sel_unread_btn = Gtk.Button(label="Mark Unread")
+        sel_unread_btn.add_css_class("flat")
+        sel_unread_btn.connect("clicked", self._on_selection_mark_unread)
+        self._selection_bar.append(sel_unread_btn)
+
+        sel_dl_btn = Gtk.Button(label="Download")
+        sel_dl_btn.add_css_class("flat")
+        sel_dl_btn.connect("clicked", self._on_selection_download)
+        self._selection_bar.append(sel_dl_btn)
+
+        sel_del_btn = Gtk.Button(label="Delete")
+        sel_del_btn.add_css_class("flat")
+        sel_del_btn.add_css_class("error")
+        sel_del_btn.connect("clicked", self._on_selection_clear_downloads)
+        self._selection_bar.append(sel_del_btn)
+
+        main_box.append(self._selection_bar)
         main_box.append(Gtk.Separator())
 
         # ── Chapter list ───────────────────────────────────────────────────
@@ -465,6 +518,8 @@ class MangaDetailView(Gtk.Box):
         self._chapter_search.set_text("")
         for mode, btn in getattr(self, "_chapter_filter_buttons", {}).items():
             btn.set_active(mode == "all")
+        self._selected_chapter_ids = set()
+        self._set_chapter_selection_mode(False)
         self._manga_title.set_text(manga.title)
         self._author_label.set_text(manga.author or "Unknown Author")
         self._status_label.set_markup(
@@ -689,29 +744,44 @@ class MangaDetailView(Gtk.Box):
 
     def _batch_mark_filtered_read(self, popover):
         popover.popdown()
-        for ch in self._get_filtered_chapters():
+        self._batch_mark_read(self._get_filtered_chapters())
+
+    def _batch_mark_filtered_unread(self, popover):
+        popover.popdown()
+        self._batch_mark_unread(self._get_filtered_chapters())
+
+    def _batch_download_filtered(self, popover):
+        popover.popdown()
+        self._batch_download(self._get_filtered_chapters())
+
+    def _batch_clear_filtered_downloads(self, popover):
+        popover.popdown()
+        self._batch_clear_downloads(self._get_filtered_chapters())
+
+    # ── Shared batch primitives (used by both the filtered-batch menu and
+    # ── the checkbox multi-select bar) ──────────────────────────────────
+
+    def _batch_mark_read(self, chapters):
+        for ch in chapters:
             if not ch.read and ch.id:
                 self._db.mark_chapter_read(ch.id)
                 ch.read = True
         self._render_chapters()
 
-    def _batch_mark_filtered_unread(self, popover):
-        popover.popdown()
-        for ch in self._get_filtered_chapters():
+    def _batch_mark_unread(self, chapters):
+        for ch in chapters:
             if ch.read and ch.id:
                 self._db.mark_chapter_unread(ch.id)
                 ch.read = False
         self._render_chapters()
 
-    def _batch_download_filtered(self, popover):
-        popover.popdown()
-        for ch in self._get_filtered_chapters():
+    def _batch_download(self, chapters):
+        for ch in chapters:
             if ch.download_status != DownloadStatus.DOWNLOADED:
                 self._download_chapter(ch)
 
-    def _batch_clear_filtered_downloads(self, popover):
-        popover.popdown()
-        for ch in self._get_filtered_chapters():
+    def _batch_clear_downloads(self, chapters):
+        for ch in chapters:
             if ch.download_status != DownloadStatus.DOWNLOADED:
                 continue
             if ch.local_path and os.path.exists(ch.local_path):
@@ -728,6 +798,58 @@ class MangaDetailView(Gtk.Box):
             ch.local_path = None
         self._render_chapters()
 
+    # ── Checkbox multi-select ────────────────────────────────────────────
+
+    def _on_select_toggle(self, btn):
+        self._set_chapter_selection_mode(btn.get_active())
+
+    def _set_chapter_selection_mode(self, enabled: bool):
+        self._chapter_selection_mode = enabled
+        if hasattr(self, "_select_toggle_btn"):
+            self._select_toggle_btn.set_active(enabled)
+        if not enabled:
+            self._selected_chapter_ids = set()
+        if hasattr(self, "_selection_bar"):
+            self._selection_bar.set_visible(enabled)
+        self._update_selection_count()
+        self._render_chapters()
+
+    def _update_selection_count(self):
+        if hasattr(self, "_selection_count_label"):
+            self._selection_count_label.set_text(f"{len(self._selected_chapter_ids)} selected")
+
+    def _on_chapter_checkbox_toggled(self, btn, chapter_id):
+        if btn.get_active():
+            self._selected_chapter_ids.add(chapter_id)
+        else:
+            self._selected_chapter_ids.discard(chapter_id)
+        self._update_selection_count()
+
+    def _on_select_all_clicked(self, *_):
+        self._selected_chapter_ids = {ch.id for ch in self._get_filtered_chapters() if ch.id}
+        self._update_selection_count()
+        self._render_chapters()
+
+    def _on_select_none_clicked(self, *_):
+        self._selected_chapter_ids = set()
+        self._update_selection_count()
+        self._render_chapters()
+
+    def _selected_chapters(self):
+        return [ch for ch in self._chapters if ch.id in self._selected_chapter_ids]
+
+    def _on_selection_mark_read(self, *_):
+        self._batch_mark_read(self._selected_chapters())
+
+    def _on_selection_mark_unread(self, *_):
+        self._batch_mark_unread(self._selected_chapters())
+
+    def _on_selection_download(self, *_):
+        self._batch_download(self._selected_chapters())
+
+    def _on_selection_clear_downloads(self, *_):
+        self._batch_clear_downloads(self._selected_chapters())
+
     def _make_chapter_row(self, chapter: Chapter) -> Gtk.ListBoxRow:
         row = Gtk.ListBoxRow()
         row.set_activatable(False)
@@ -737,6 +859,13 @@ class MangaDetailView(Gtk.Box):
         box.set_margin_end(8)
         box.set_margin_top(8)
         box.set_margin_bottom(8)
+
+        if self._chapter_selection_mode and chapter.id:
+            check = Gtk.CheckButton()
+            check.set_active(chapter.id in self._selected_chapter_ids)
+            check.set_valign(Gtk.Align.CENTER)
+            check.connect("toggled", self._on_chapter_checkbox_toggled, chapter.id)
+            box.append(check)
 
         # Chapter info
         info_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
