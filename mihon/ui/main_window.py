@@ -393,12 +393,34 @@ class MainWindow(Adw.ApplicationWindow):
 
         self._auto_update_row = Adw.SwitchRow(
             title="Auto-update library",
-            subtitle="Check for new chapters on startup",
+            subtitle="Check for new chapters on startup and on a schedule",
         )
         auto_update = get_db().get_setting("auto_update_library", "1") == "1"
         self._auto_update_row.set_active(auto_update)
         self._auto_update_row.connect("notify::active", self._on_auto_update_toggled)
         lib_group.add(self._auto_update_row)
+
+        self._UPDATE_INTERVAL_VALUES = ["0", "6", "12", "24"]
+        interval_row = Adw.ComboRow(
+            title="Update interval",
+            subtitle="How often to check the library in the background",
+        )
+        interval_row.set_model(Gtk.StringList.new(["Manual only", "Every 6 hours", "Every 12 hours", "Every 24 hours"]))
+        current_interval = get_db().get_setting("library_update_interval_hours", "12")
+        interval_row.set_selected(
+            self._UPDATE_INTERVAL_VALUES.index(current_interval)
+            if current_interval in self._UPDATE_INTERVAL_VALUES else 2
+        )
+        interval_row.connect("notify::selected", self._on_update_interval_changed)
+        lib_group.add(interval_row)
+
+        skip_dropped_row = Adw.SwitchRow(
+            title="Skip dropped manga in background checks",
+            subtitle="The manual Check Updates button always checks everything",
+        )
+        skip_dropped_row.set_active(get_db().get_setting("smart_update_skip_dropped", "1") == "1")
+        skip_dropped_row.connect("notify::active", self._on_skip_dropped_toggled)
+        lib_group.add(skip_dropped_row)
 
         unread_row = Adw.SwitchRow(title="Show unread badge", subtitle="Show unread chapter count on covers")
         unread_row.set_active(get_db().get_setting("show_unread_badge", "1") == "1")
@@ -564,6 +586,17 @@ class MainWindow(Adw.ApplicationWindow):
 
         value = "1" if row.get_active() else "0"
         get_db().set_setting("auto_update_library", value)
+        self._updates_view.reschedule()
+
+    def _on_update_interval_changed(self, row, _pspec):
+        get_db().set_setting(
+            "library_update_interval_hours", self._UPDATE_INTERVAL_VALUES[row.get_selected()]
+        )
+        self._updates_view.reschedule()
+
+    def _on_skip_dropped_toggled(self, row, _pspec):
+        value = "1" if row.get_active() else "0"
+        get_db().set_setting("smart_update_skip_dropped", value)
 
     def _on_show_unread_badge_toggled(self, row, _pspec):
         value = "1" if row.get_active() else "0"

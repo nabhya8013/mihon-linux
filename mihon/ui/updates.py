@@ -26,9 +26,11 @@ class UpdatesView(Gtk.Box):
         self._checking = False
         self._last_checked_at = None
         self._did_initial_refresh = False
+        self._scheduled_source = None
 
         self._build_ui()
         self.refresh_cached()
+        self.reschedule()
 
     def _build_ui(self):
         header_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
@@ -113,10 +115,41 @@ class UpdatesView(Gtk.Box):
         self._did_initial_refresh = True
         self._start_update_check()
 
+    def reschedule(self):
+        """
+        (Re)arm the periodic background check per the configured interval.
+        Call this after the interval or auto-update setting changes.
+        """
+        if self._scheduled_source is not None:
+            GLib.source_remove(self._scheduled_source)
+            self._scheduled_source = None
+
+        if self._db.get_setting("auto_update_library", "1") != "1":
+            return
+        try:
+            hours = float(self._db.get_setting("library_update_interval_hours", "12"))
+        except ValueError:
+            hours = 12.0
+        if hours <= 0:
+            return  # "Manual only"
+
+        self._scheduled_source = GLib.timeout_add_seconds(
+            int(hours * 3600), self._on_scheduled_check_tick
+        )
+
+    def _on_scheduled_check_tick(self) -> bool:
+        # Idle manga cost a source round trip every cycle for no benefit, so
+        # scheduled runs can skip anything the user has dropped; the button
+        # below always checks the full library on demand.
+        if not self._checking:
+            skip_dropped = self._db.get_setting("smart_update_skip_dropped", "1") == "1"
+            self._start_update_check(skip_dropped=skip_dropped)
+        return True  # keep firing on this interval
+
     def _on_check_updates_clicked(self, *_):
         self._start_update_check()
 
-    def _start_update_check(self):
+    def _start_update_check(self, skip_dropped: bool = False):
         if self._checking:
             return
 
@@ -128,7 +161,9 @@ class UpdatesView(Gtk.Box):
         self._stack.set_visible_child_name("loading")
 
         def run():
-            summary = self._updater.check_updates(progress_cb=self._on_progress)
+            summary = self._updater.check_updates(
+                progress_cb=self._on_progress, skip_dropped=skip_dropped
+            )
             GLib.idle_add(self._on_check_complete, summary)
 
         threading.Thread(target=run, daemon=True).start()

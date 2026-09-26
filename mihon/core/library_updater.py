@@ -6,7 +6,7 @@ from dataclasses import dataclass, field
 from typing import Callable, List, Optional
 
 from .database import get_db
-from .models import Manga, Chapter
+from .models import Manga, Chapter, ReadingStatus
 from ..extensions.registry import get_registry
 
 
@@ -39,6 +39,7 @@ class LibraryUpdater:
     def check_updates(
         self,
         progress_cb: Optional[Callable[[int, int, Manga], None]] = None,
+        skip_dropped: bool = False,
     ) -> LibraryUpdateSummary:
         summary = LibraryUpdateSummary()
         registry = get_registry()
@@ -50,6 +51,11 @@ class LibraryUpdater:
             pass
 
         library = self._db.get_library()
+        if skip_dropped:
+            # Scheduled/background runs skip manga the user has dropped, so an
+            # idle series doesn't cost a network round trip every cycle. The
+            # manual "Check Updates" button always checks everything.
+            library = [m for m in library if m.reading_status != ReadingStatus.DROPPED]
         total = len(library)
 
         for idx, manga in enumerate(library, start=1):
