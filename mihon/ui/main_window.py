@@ -6,6 +6,7 @@ import gi
 gi.require_version("Gtk", "4.0")
 gi.require_version("Adw", "1")
 from gi.repository import Gtk, Adw, GLib, GObject, Gio, Pango
+import json
 import threading
 import webbrowser
 from pathlib import Path
@@ -443,6 +444,23 @@ class MainWindow(Adw.ApplicationWindow):
         skip_dropped_row.connect("notify::active", self._on_skip_dropped_toggled)
         lib_group.add(skip_dropped_row)
 
+        categories_row = Adw.ExpanderRow(
+            title="Exclude categories from background updates",
+            subtitle="The manual Check Updates button always checks everything",
+        )
+        try:
+            excluded_ids = set(json.loads(
+                get_db().get_setting("smart_update_excluded_categories", "[]")
+            ))
+        except ValueError:
+            excluded_ids = set()
+        for category in get_db().get_categories():
+            cat_row = Adw.SwitchRow(title=category.name)
+            cat_row.set_active(category.id in excluded_ids)
+            cat_row.connect("notify::active", self._on_category_excluded_toggled, category.id)
+            categories_row.add_row(cat_row)
+        lib_group.add(categories_row)
+
         unread_row = Adw.SwitchRow(title="Show unread badge", subtitle="Show unread chapter count on covers")
         unread_row.set_active(get_db().get_setting("show_unread_badge", "1") == "1")
         unread_row.connect("notify::active", self._on_show_unread_badge_toggled)
@@ -626,6 +644,19 @@ class MainWindow(Adw.ApplicationWindow):
     def _on_skip_dropped_toggled(self, row, _pspec):
         value = "1" if row.get_active() else "0"
         get_db().set_setting("smart_update_skip_dropped", value)
+
+    def _on_category_excluded_toggled(self, row, _pspec, category_id: int):
+        try:
+            excluded = set(json.loads(
+                get_db().get_setting("smart_update_excluded_categories", "[]")
+            ))
+        except ValueError:
+            excluded = set()
+        if row.get_active():
+            excluded.add(category_id)
+        else:
+            excluded.discard(category_id)
+        get_db().set_setting("smart_update_excluded_categories", json.dumps(sorted(excluded)))
 
     def _on_show_unread_badge_toggled(self, row, _pspec):
         value = "1" if row.get_active() else "0"

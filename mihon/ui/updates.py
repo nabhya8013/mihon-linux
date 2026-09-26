@@ -5,6 +5,7 @@ import gi
 gi.require_version("Gtk", "4.0")
 gi.require_version("Adw", "1")
 from gi.repository import Gtk, Adw, GLib
+import json
 import threading
 import time
 
@@ -140,19 +141,30 @@ class UpdatesView(Gtk.Box):
 
     def _on_scheduled_check_tick(self) -> bool:
         # Idle manga cost a source round trip every cycle for no benefit, so
-        # scheduled runs can skip anything the user has dropped; the button
-        # below always checks the full library on demand.
+        # scheduled runs can skip anything the user has dropped or put in an
+        # excluded category; the button below always checks everything.
         if not self._checking:
             skip_dropped = self._db.get_setting("smart_update_skip_dropped", "1") == "1"
+            try:
+                excluded = json.loads(self._db.get_setting("smart_update_excluded_categories", "[]"))
+            except ValueError:
+                excluded = []
             # A silent background run is exactly the case a desktop
             # notification is for - the user isn't watching this tab.
-            self._start_update_check(skip_dropped=skip_dropped, desktop_notify=True)
+            self._start_update_check(
+                skip_dropped=skip_dropped, excluded_category_ids=excluded, desktop_notify=True
+            )
         return True  # keep firing on this interval
 
     def _on_check_updates_clicked(self, *_):
         self._start_update_check()
 
-    def _start_update_check(self, skip_dropped: bool = False, desktop_notify: bool = False):
+    def _start_update_check(
+        self,
+        skip_dropped: bool = False,
+        excluded_category_ids=None,
+        desktop_notify: bool = False,
+    ):
         if self._checking:
             return
 
@@ -166,7 +178,9 @@ class UpdatesView(Gtk.Box):
 
         def run():
             summary = self._updater.check_updates(
-                progress_cb=self._on_progress, skip_dropped=skip_dropped
+                progress_cb=self._on_progress,
+                skip_dropped=skip_dropped,
+                excluded_category_ids=excluded_category_ids,
             )
             GLib.idle_add(self._on_check_complete, summary)
 

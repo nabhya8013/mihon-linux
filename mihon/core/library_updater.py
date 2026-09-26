@@ -40,6 +40,7 @@ class LibraryUpdater:
         self,
         progress_cb: Optional[Callable[[int, int, Manga], None]] = None,
         skip_dropped: bool = False,
+        excluded_category_ids: Optional[List[int]] = None,
     ) -> LibraryUpdateSummary:
         summary = LibraryUpdateSummary()
         registry = get_registry()
@@ -56,6 +57,12 @@ class LibraryUpdater:
             # idle series doesn't cost a network round trip every cycle. The
             # manual "Check Updates" button always checks everything.
             library = [m for m in library if m.reading_status != ReadingStatus.DROPPED]
+        if excluded_category_ids:
+            excluded = set(excluded_category_ids)
+            library = [
+                m for m in library
+                if not (m.id and excluded.intersection(self._db.get_manga_category_ids(m.id)))
+            ]
         total = len(library)
 
         for idx, manga in enumerate(library, start=1):

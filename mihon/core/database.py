@@ -323,6 +323,7 @@ class Database:
             "library_update_interval_hours": "12",
             "smart_update_skip_dropped": "1",
             "desktop_notifications_enabled": "1",
+            "smart_update_excluded_categories": "[]",
             "reader_tap_invert": "0",
             "reader_fullscreen": "0",
             "reader_keep_screen_on": "0",
