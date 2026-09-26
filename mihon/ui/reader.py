@@ -11,7 +11,18 @@ import time
 from ..core.database import get_db
 from ..core.models import Manga, Chapter, Page, ReadingDirection
 from ..core import image_loader
+from ..core.page_cache import (
+    AUTO_DOUBLE_MIN_WIDTH,
+    PageCache,
+    pixbuf_is_spread,
+    should_auto_double,
+)
 from ..extensions.registry import get_registry
+from ..core.tracking import TrackManager, get_track_manager
+from .notify import notify_retry
+import logging
+
+logger = logging.getLogger("reader")
 
 
 class PageView(Gtk.ScrolledWindow):
@@ -73,6 +84,12 @@ class DoublePageView(Gtk.ScrolledWindow):
         self._right.set_pixbuf(right if right else None)
         self._right.set_visible(right is not None)
 
+    def set_spread(self, pixbuf):
+        """Show one landscape image across the whole viewport, unpaired."""
+        self._left.set_pixbuf(pixbuf if pixbuf else None)
+        self._right.set_pixbuf(None)
+        self._right.set_visible(False)
+
     def set_loading(self):
         self._left.set_pixbuf(None)
         self._right.set_pixbuf(None)
@@ -91,7 +108,9 @@ class WebtoonView(Gtk.ScrolledWindow):
         self.set_hexpand(True)
         self.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
 
-        self._box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
+        # No spacing: webtoon panels are cut from one continuous strip, so any
+        # gap between pictures shows as a seam through the artwork.
+        self._box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=0)
         self._box.set_hexpand(True)
         viewport = Gtk.Viewport()
         viewport.set_child(self._box)
@@ -178,7 +197,7 @@ class ReaderView(Gtk.Box):
         self._direction = ReadingDirection.RTL
         self._mode = "paged"  # paged | webtoon
         self._zoom = 1.0
-        self._page_layout = "single"  # single | double
+        self._page_layout = "single"  # single | double | auto
         self._scale_type = "fit_page"  # fit_page | fit_width
         self._crop_borders = False
         self._tap_invert = False
@@ -190,9 +209,26 @@ class ReaderView(Gtk.Box):
         self._ui_visible = True
         self._db = get_db()
 
+        # Sliding-window prefetch, so a page turn is served from memory.
+        self._page_cache = PageCache()
+        image_loader.set_cache_limit(
+            max(image_loader.DEFAULT_CACHE_LIMIT, self._page_cache.window_size * 4)
+        )
+        # Indices whose image turned out to be a landscape two-page spread.
+        # Populated as pages decode, and used to keep double-page pairing
+        # aligned the way Android does.
+        self._spread_indices = set()
+        # How far _next_page/_prev_page should step from the current view.
+        self._page_step = 1
+        # Chapter ids already reported to the trackers this session, so a
+        # sync fires once per chapter rather than on every page turn past the
+        # threshold.
+        self._tracking_synced = set()
+
         self._build_ui()
         self._load_preferences()
         self._setup_keyboard()
+        self.connect("map", self._on_mapped)
 
     def _build_ui(self):
         # The main container is an overlay
@@ -418,6 +454,15 @@ class ReaderView(Gtk.Box):
         self._double_layout_btn.connect("toggled", self._set_page_layout, "double")
         layout_box.append(self._double_layout_btn)
 
+        self._auto_layout_btn = Gtk.ToggleButton(label="Auto")
+        self._auto_layout_btn.set_group(self._single_layout_btn)
+        self._auto_layout_btn.set_hexpand(True)
+        self._auto_layout_btn.set_tooltip_text(
+            f"Double pages when the window is at least {AUTO_DOUBLE_MIN_WIDTH}px wide"
+        )
+        self._auto_layout_btn.connect("toggled", self._set_page_layout, "auto")
+        layout_box.append(self._auto_layout_btn)
+
         box.append(layout_box)
 
         # Scale type
@@ -532,7 +577,7 @@ class ReaderView(Gtk.Box):
             self._direction = ReadingDirection.RTL
 
         self._page_layout = self._db.get_setting("page_layout", "single")
-        if self._page_layout not in ("single", "double"):
+        if self._page_layout not in ("single", "double", "auto"):
             self._page_layout = "single"
 
         self._scale_type = self._db.get_setting("scale_type", "fit_page")
@@ -566,6 +611,7 @@ class ReaderView(Gtk.Box):
         if hasattr(self, "_single_layout_btn"):
             self._single_layout_btn.set_active(self._page_layout == "single")
             self._double_layout_btn.set_active(self._page_layout == "double")
+            self._auto_layout_btn.set_active(self._page_layout == "auto")
 
         if hasattr(self, "_fit_page_btn"):
             self._fit_page_btn.set_active(self._scale_type == "fit_page")
@@ -611,8 +657,61 @@ class ReaderView(Gtk.Box):
         self._apply_fullscreen()
         self._apply_slider_visibility()
 
+    def _effective_layout(self) -> str:
+        """
+        Resolve the layout preference to what is actually drawn.
+
+        "auto" means double-page on a window wide enough to fit two pages
+        side by side, and single-page otherwise. There is no phone-sized
+        equivalent on Android; this exists because a desktop window changes
+        width while reading.
+        """
+        if self._page_layout != "auto":
+            return self._page_layout
+        return "double" if should_auto_double(self._window_width()) else "single"
+
+    def _window_width(self) -> int:
+        width = self.get_width()
+        if width > 0:
+            return width
+        root = self.get_root()
+        return root.get_width() if root is not None else 0
+
+    def _on_mapped(self, *_):
+        """
+        Start watching the window for width changes.
+
+        Gtk.Widget has no width property to notify on, so watch the toplevel
+        window's own size properties instead. They only change on a real
+        resize, unlike a per-frame tick callback.
+        """
+        root = self.get_root()
+        if root is None or getattr(self, "_resize_watch_root", None) is root:
+            return
+        self._resize_watch_root = root
+        for prop in ("default-width", "maximized", "fullscreened"):
+            try:
+                root.connect(f"notify::{prop}", self._on_reader_resized)
+            except TypeError:
+                # Not every toplevel exposes all three.
+                pass
+        self._on_reader_resized()
+
+    def _on_reader_resized(self, *_):
+        """Re-render when an "auto" layout crosses the double-page threshold."""
+        if self._page_layout != "auto" or not self._pages:
+            return
+        resolved = self._effective_layout()
+        if resolved == getattr(self, "_last_resolved_layout", None):
+            return
+        self._last_resolved_layout = resolved
+        self._apply_page_layout()
+        if self._mode == "paged":
+            self._show_page(self._current_page)
+
     def _apply_page_layout(self):
-        if self._page_layout == "double":
+        self._last_resolved_layout = self._effective_layout()
+        if self._effective_layout() == "double":
             self._page_stack.set_visible_child_name("double")
         else:
             self._page_stack.set_visible_child_name("single")
@@ -747,6 +846,8 @@ class ReaderView(Gtk.Box):
 
     def _on_pages_loaded(self, pages, force_start=False):
         self._pages = pages
+        self._spread_indices = set()
+        self._page_cache.set_pages(pages)
         self._page_spinner.stop()
         self._page_spinner.set_visible(False)
 
@@ -767,7 +868,7 @@ class ReaderView(Gtk.Box):
 
         # Setup slider
         self._slider.set_range(0, max(len(pages) - 1, 1))
-        step = 2 if self._mode == "paged" and self._page_layout == "double" else 1
+        step = 2 if self._mode == "paged" and self._effective_layout() == "double" else 1
         self._slider.set_increments(step, step)
 
         if self._mode == "webtoon":
@@ -782,24 +883,75 @@ class ReaderView(Gtk.Box):
         self._page_spinner.stop()
         self._page_spinner.set_visible(False)
         self._page_label.set_text(f"Error: {message}")
-        print(f"[reader] Error: {message}")
+        logger.error("chapter load failed: %s", message)
+        if self._manga is not None and self._chapter is not None:
+            notify_retry(
+                self,
+                f"Could not load this chapter: {message}",
+                lambda: self.load_chapter(self._manga, self._chapter),
+            )
+
+    # ── Double-page pairing ───────────────────────────────────────────────
+
+    def _page_pairs(self):
+        """
+        Group pages into what each double-page view shows.
+
+        A landscape image is a two-page spread scanned as one file, so it
+        takes the viewport alone and everything after it shifts by one. Pages
+        whose size is not known yet are assumed narrow, which is what a fixed
+        even/odd pairing would have done anyway.
+        """
+        pairs = []
+        i = 0
+        total = len(self._pages)
+        while i < total:
+            if i in self._spread_indices:
+                pairs.append((i, i + 1))
+                i += 1
+            elif i + 1 < total and (i + 1) in self._spread_indices:
+                # The next page is a spread, so this one stands alone rather
+                # than being paired with half of a spread.
+                pairs.append((i, i + 1))
+                i += 1
+            else:
+                pairs.append((i, min(i + 2, total)))
+                i += 2
+        return pairs
+
+    def _pair_containing(self, idx):
+        """The (start, end) pair covering ``idx``, end exclusive."""
+        for pair in self._page_pairs():
+            if pair[0] <= idx < pair[1]:
+                return pair
+        return (idx, min(idx + 1, len(self._pages)))
+
+    def _mark_spread(self, idx, pixbuf) -> bool:
+        """Record a decoded page as a spread. True when that is new."""
+        if not pixbuf_is_spread(pixbuf) or idx in self._spread_indices:
+            return False
+        self._spread_indices.add(idx)
+        return True
 
     def _show_page(self, idx):
         if not self._pages or idx < 0 or idx >= len(self._pages):
             return
-        if self._mode == "paged" and self._page_layout == "double":
-            # Align on even indices to keep spreads stable
-            idx = max(0, idx - (idx % 2))
+
+        is_double = self._mode == "paged" and self._effective_layout() == "double"
+
+        if is_double:
+            idx, pair_end = self._pair_containing(idx)
+            self._page_step = pair_end - idx
+        else:
+            pair_end = idx + 1
+            self._page_step = 1
+
         self._current_page = idx
         self._render_token += 1
         token = self._render_token
 
-        if self._mode == "paged" and self._page_layout == "double":
-            end_idx = min(idx + 1, len(self._pages) - 1)
-            if end_idx == idx:
-                self._page_label.set_text(f"{idx + 1} / {len(self._pages)}")
-            else:
-                self._page_label.set_text(f"{idx + 1}-{end_idx + 1} / {len(self._pages)}")
+        if is_double and pair_end - idx > 1:
+            self._page_label.set_text(f"{idx + 1}-{pair_end} / {len(self._pages)}")
         else:
             self._page_label.set_text(f"{idx + 1} / {len(self._pages)}")
 
@@ -808,47 +960,62 @@ class ReaderView(Gtk.Box):
         self._slider.set_value(idx)
         self._slider_changing = False
 
+        # Warm the pages around this one so the next turn is already decoded.
+        self._page_cache.focus(idx)
+
         # Save progress
-        progress_idx = idx
-        if self._mode == "paged" and self._page_layout == "double" and idx + 1 < len(self._pages):
-            progress_idx = idx + 1
+        progress_idx = pair_end - 1 if is_double else idx
         self._save_progress(progress_idx)
 
-        if self._mode == "paged" and self._page_layout == "double":
+        if is_double:
             left_page = self._pages[idx]
-            right_page = self._pages[idx + 1] if idx + 1 < len(self._pages) else None
+            right_page = self._pages[idx + 1] if pair_end - idx > 1 else None
             self._double_page_view.set_loading()
 
             def set_left(pb):
                 if token != self._render_token:
                     return
-                current_right = getattr(self, "_double_right_pb", None)
+                if self._mark_spread(idx, pb):
+                    # This page turned out to be a full spread. Re-render so it
+                    # gets the whole viewport and the pairing after it shifts.
+                    self._show_page(idx)
+                    return
                 self._double_left_pb = pb
-                self._double_page_view.set_pixbufs(self._double_left_pb, current_right)
+                if right_page is None:
+                    self._double_page_view.set_spread(pb)
+                else:
+                    self._double_page_view.set_pixbufs(
+                        pb, getattr(self, "_double_right_pb", None)
+                    )
 
             def set_right(pb):
                 if token != self._render_token:
                     return
-                current_left = getattr(self, "_double_left_pb", None)
+                if self._mark_spread(idx + 1, pb):
+                    # The right half is a spread, so it cannot share this view.
+                    self._show_page(idx)
+                    return
                 self._double_right_pb = pb
-                self._double_page_view.set_pixbufs(current_left, self._double_right_pb)
+                self._double_page_view.set_pixbufs(
+                    getattr(self, "_double_left_pb", None), pb
+                )
 
             self._double_left_pb = None
             self._double_right_pb = None
             self._load_page_pixbuf(left_page, set_left)
-            if right_page:
+            if right_page is not None:
                 self._load_page_pixbuf(right_page, set_right)
-            else:
-                self._double_page_view.set_pixbufs(self._double_left_pb, None)
             return
 
         # Single-page load
         page = self._pages[idx]
         self._page_view.set_loading()
+
         def set_single(pb):
             if token != self._render_token:
                 return
             self._page_view.set_pixbuf(pb)
+
         self._load_page_pixbuf(page, set_single)
 
     def _load_page_pixbuf(self, page: Page, on_ready):
@@ -868,16 +1035,29 @@ class ReaderView(Gtk.Box):
             image_loader.load_image_async(primary_url, on_primary_ready)
 
     def _next_page(self):
-        step = 2 if self._mode == "paged" and self._page_layout == "double" else 1
-        if self._current_page < len(self._pages) - 1:
-            self._show_page(min(self._current_page + step, len(self._pages) - 1))
+        # Step by what the current view actually covers: two pages normally,
+        # one when a spread is on screen.
+        step = self._page_step if self._mode == "paged" else 1
+        if self._current_page + step < len(self._pages):
+            self._show_page(self._current_page + step)
+        elif self._current_page < len(self._pages) - 1:
+            self._show_page(len(self._pages) - 1)
         else:
             self._on_chapter_finished()
 
     def _prev_page(self):
-        step = 2 if self._mode == "paged" and self._page_layout == "double" else 1
-        if self._current_page > 0:
-            self._show_page(max(self._current_page - step, 0))
+        if self._current_page <= 0:
+            return
+        if self._mode == "paged" and self._effective_layout() == "double":
+            # Land on the start of the previous pair, not a fixed two back.
+            previous = None
+            for pair_start, pair_end in self._page_pairs():
+                if pair_end > self._current_page:
+                    break
+                previous = pair_start
+            self._show_page(previous if previous is not None else 0)
+            return
+        self._show_page(self._current_page - 1)
 
     def _on_left_tap(self, *_):
         rtl = self._direction == ReadingDirection.RTL
@@ -945,6 +1125,42 @@ class ReaderView(Gtk.Box):
         if self._chapter and self._chapter.id and self._manga and self._manga.id:
             self._db.update_chapter_progress(self._chapter.id, page_idx)
             self._db.record_history(self._manga.id, self._chapter.id, page_idx)
+            self._maybe_sync_tracking(page_idx)
+
+    def _maybe_sync_tracking(self, page_idx: int):
+        """
+        Push this chapter to the linked trackers once it is read far enough.
+
+        Android fires at roughly 85% of the last page rather than on the page
+        turn, so a chapter opened by accident does not register. The sync runs
+        once per chapter and on a worker thread, since it makes network calls.
+        """
+        chapter = self._chapter
+        if chapter is None or self._manga is None or self._manga.id is None:
+            return
+        if chapter.id in self._tracking_synced:
+            return
+        if not TrackManager.should_sync(page_idx, len(self._pages)):
+            return
+
+        chapter_number = chapter.chapter_number
+        if chapter_number is None or chapter_number < 0:
+            return
+
+        self._tracking_synced.add(chapter.id)
+        manga_id = self._manga.id
+
+        def work():
+            try:
+                manager = get_track_manager()
+                if not manager.entries_for(manga_id):
+                    return
+                manager.sync_progress(manga_id, chapter_number)
+                manager.process_queue()
+            except Exception as exc:
+                logger.warning("tracker sync failed: %s", exc)
+
+        threading.Thread(target=work, daemon=True).start()
 
     def _set_direction(self, btn, direction: ReadingDirection):
         if self._syncing_prefs or not btn.get_active():
@@ -1037,6 +1253,8 @@ class ReaderView(Gtk.Box):
             self._show_page(self._current_page)
 
     def _close(self, *_):
+        # Drop the prefetch window so a closed chapter stops holding memory.
+        self._page_cache.clear()
         root = self.get_root()
         if isinstance(root, Gtk.Window):
             try:

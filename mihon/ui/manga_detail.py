@@ -12,11 +12,20 @@ import shutil
 import webbrowser
 from ..core.database import get_db
 from ..core.models import Manga, Chapter, ReadingStatus, DownloadStatus, SearchFilter
-from ..core import image_loader
+from ..core import disk_cache, image_loader
+from ..core.tracking import (
+    ALL_STATUSES,
+    STATUS_LABELS,
+    TrackEntry,
+    get_track_manager,
+)
 from ..extensions.registry import get_registry
 from ..core.downloader import get_download_manager
+from .notify import notify, notify_error
+import logging
 
-TRACKING_PROVIDERS = ["anilist", "myanimelist", "kitsu", "mangaupdates", "shikimori", "bangumi"]
+logger = logging.getLogger("manga_detail")
+
 
 
 class MangaDetailView(Gtk.Box):
@@ -245,11 +254,44 @@ class MangaDetailView(Gtk.Box):
 
         # Sort toggle
         sort_btn = Gtk.ToggleButton(icon_name="view-sort-descending-symbolic")
-        sort_btn.set_tooltip_text("Sort chapters")
+        sort_btn.set_tooltip_text("Reverse chapter order")
         sort_btn.set_active(True)
         sort_btn.connect("toggled", self._toggle_sort)
         self._sort_descending = True
         ch_header.append(sort_btn)
+
+        # Chapter number is meaningless on sources that do not number their
+        # chapters, so the source's own ordering is offered as an alternative.
+        self._chapter_sort = "number"
+        sort_mode_btn = Gtk.MenuButton(icon_name="view-list-ordered-symbolic")
+        sort_mode_btn.set_tooltip_text("Chapter sort order")
+        sort_mode_pop = Gtk.Popover()
+        sort_mode_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
+        sort_mode_box.set_margin_start(8)
+        sort_mode_box.set_margin_end(8)
+        sort_mode_box.set_margin_top(8)
+        sort_mode_box.set_margin_bottom(8)
+
+        self._chapter_sort_buttons = {}
+        first_btn = None
+        for key, label in (
+            ("number", "Chapter number"),
+            ("source", "Source order"),
+            ("upload", "Upload date"),
+        ):
+            btn = Gtk.CheckButton(label=label)
+            if first_btn is None:
+                first_btn = btn
+                btn.set_active(True)
+            else:
+                btn.set_group(first_btn)
+            btn.connect("toggled", self._set_chapter_sort, key)
+            sort_mode_box.append(btn)
+            self._chapter_sort_buttons[key] = btn
+
+        sort_mode_pop.set_child(sort_mode_box)
+        sort_mode_btn.set_popover(sort_mode_pop)
+        ch_header.append(sort_mode_btn)
 
         # Mark all read
         mark_all_btn = Gtk.Button(icon_name="emblem-ok-symbolic")
@@ -457,10 +499,32 @@ class MangaDetailView(Gtk.Box):
                 url,
                 self._on_cover_loaded,
                 width=320, height=480,  # Higher resolution for the blurred background
+                kind=disk_cache.KIND_COVER,
             )
+            # Record where the cover landed so the library grid can read it
+            # straight off disk instead of going back to the network.
+            self._remember_cover_path(manga, url)
 
         # Load details + chapters in background
         self._load_details()
+
+    def _remember_cover_path(self, manga, url: str):
+        """Persist the on-disk cover path once the file exists."""
+        if manga is None or manga.id is None or manga.cover_local_path:
+            return
+
+        def check():
+            path = image_loader.cached_path(url, disk_cache.KIND_COVER)
+            if path is None:
+                return True  # Not fetched yet; look again on the next tick.
+            try:
+                get_db().update_cover_path(manga.id, path)
+                manga.cover_local_path = path
+            except Exception as exc:
+                logger.warning("could not record cover path: %s", exc)
+            return False
+
+        GLib.timeout_add(500, check)
 
     def _on_cover_loaded(self, pixbuf):
         if not pixbuf:
@@ -480,8 +544,14 @@ class MangaDetailView(Gtk.Box):
 
         def fetch():
             try:
-                # Get full details
-                updated = ext.get_manga_details(manga)
+                # A manga already initialized carries everything the details
+                # call would return, so skip the round trip and go straight to
+                # chapters. This is Android's SManga.initialized behaviour.
+                if manga.initialized and manga.id:
+                    updated = manga
+                else:
+                    updated = ext.get_manga_details(manga)
+                    updated.initialized = True
                 updated.in_library = manga.in_library
                 updated.reading_status = manga.reading_status
                 updated.added_at = manga.added_at
@@ -491,18 +561,19 @@ class MangaDetailView(Gtk.Box):
                 db_id = self._db.upsert_manga(updated)
                 updated.id = db_id
 
-                # Get chapters
+                # Chapters are always re-fetched: unlike details, the list
+                # grows as the series updates.
                 chapters = ext.get_chapters(updated)
-                print(f"[detail] Extension returned {len(chapters)} chapters")
+                logger.debug("extension returned %d chapters", len(chapters))
                 for ch in chapters:
                     ch.manga_id = db_id
                 self._db.upsert_chapters(chapters)
                 # Re-fetch from DB to get IDs
-                db_chapters = self._db.get_chapters(db_id)
-                print(f"[detail] DB returned {len(db_chapters)} chapters after upsert")
+                db_chapters = self._db.get_chapters(db_id, sort=self._chapter_sort)
+                logger.debug("db returned %d chapters after upsert", len(db_chapters))
                 GLib.idle_add(self._on_details_loaded, updated, db_chapters)
             except Exception as e:
-                print(f"[detail] Error loading details: {e}")
+                logger.error("error loading details: %s", e)
                 # Still try to show cached chapters
                 if manga.id:
                     db_chapters = self._db.get_chapters(manga.id)
@@ -525,11 +596,7 @@ class MangaDetailView(Gtk.Box):
             self._chapter_list.remove(child)
             child = nxt
 
-        chapters = self._get_filtered_chapters()
-        if self._sort_descending:
-            chapters = sorted(chapters, key=lambda c: c.chapter_number, reverse=True)
-        else:
-            chapters = sorted(chapters, key=lambda c: c.chapter_number)
+        chapters = self._sort_chapters(self._get_filtered_chapters())
 
         total = len(self._chapters)
         shown = len(chapters)
@@ -728,7 +795,7 @@ class MangaDetailView(Gtk.Box):
             try:
                 webbrowser.open(self._manga.url)
             except Exception as e:
-                print(f"[detail] Could not open web URL: {e}")
+                logger.error("could not open web URL: %s", e)
 
     def _ensure_manga_persisted(self) -> bool:
         if not self._manga:
@@ -747,197 +814,387 @@ class MangaDetailView(Gtk.Box):
         if not rows:
             self._tracking_summary.set_text("Tracking: none")
             return
+        manager = get_track_manager()
         parts = []
         for row in rows:
-            progress = row.get("progress") or 0
-            status = row.get("status") or "linked"
-            parts.append(f"{row['provider']}: {status} ({progress:g})")
+            service = manager.get_service(row["provider"])
+            name = service.name if service else row["provider"]
+            status = STATUS_LABELS.get(row.get("status") or "", row.get("status") or "Linked")
+            progress = float(row.get("progress") or 0)
+            total = float(row.get("total_chapters") or 0)
+            counter = f"{progress:g}/{total:g}" if total else f"{progress:g}"
+            parts.append(f"{name}: {status} ({counter})")
         self._tracking_summary.set_text("Tracking: " + "  •  ".join(parts))
 
     def _open_tracking_dialog(self, *_):
+        """
+        Manage this manga's tracker links.
+
+        One section per registered service. A service the user is not logged
+        in to says so and offers nothing else; a linked one shows editable
+        status, progress and score, plus refresh and unlink.
+        """
         if not self._ensure_manga_persisted():
             return
         root = self.get_root()
         if not isinstance(root, Gtk.Window):
             return
 
-        dialog = Gtk.Dialog(title="Tracking", transient_for=root, modal=True)
-        dialog.set_default_size(560, 460)
-        dialog.add_button("Close", Gtk.ResponseType.CLOSE)
-        dialog.connect("response", lambda d, _r: d.close())
+        dialog = Adw.Window(
+            transient_for=root,
+            modal=True,
+            title="Tracking",
+            default_width=520,
+            default_height=600,
+        )
+        toolbar = Adw.ToolbarView()
+        header = Adw.HeaderBar()
+        header.set_title_widget(Adw.WindowTitle(
+            title="Tracking", subtitle=self._manga.title or ""
+        ))
+        toolbar.add_top_bar(header)
 
-        area = dialog.get_content_area()
-        area.set_margin_start(12)
-        area.set_margin_end(12)
-        area.set_margin_top(12)
-        area.set_margin_bottom(12)
+        self._track_body = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=12)
+        self._track_body.set_margin_start(16)
+        self._track_body.set_margin_end(16)
+        self._track_body.set_margin_top(16)
+        self._track_body.set_margin_bottom(16)
 
-        layout = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
-        area.append(layout)
-
-        hint = Gtk.Label(label="Add or update tracking links and progress for this manga.")
-        hint.add_css_class("dim-label")
-        hint.set_xalign(0)
-        layout.append(hint)
-
-        form = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
-        layout.append(form)
-
-        provider_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
-        provider_lbl = Gtk.Label(label="Provider")
-        provider_lbl.set_xalign(0)
-        provider_lbl.set_size_request(90, -1)
-        provider_row.append(provider_lbl)
-        self._track_provider_combo = Gtk.ComboBoxText()
-        for provider in TRACKING_PROVIDERS:
-            self._track_provider_combo.append_text(provider)
-        self._track_provider_combo.set_active(0)
-        provider_row.append(self._track_provider_combo)
-        form.append(provider_row)
-
-        self._track_status_entry = Gtk.Entry()
-        self._track_status_entry.set_placeholder_text("Status (e.g. reading, completed)")
-        form.append(self._track_status_entry)
-
-        progress_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
-        self._track_progress = Gtk.SpinButton.new_with_range(0, 10000, 1)
-        self._track_progress.set_numeric(True)
-        self._track_progress.set_hexpand(True)
-        self._track_score = Gtk.SpinButton.new_with_range(0, 10, 0.1)
-        self._track_score.set_numeric(True)
-        self._track_score.set_digits(1)
-        self._track_score.set_hexpand(True)
-        progress_row.append(Gtk.Label(label="Progress"))
-        progress_row.append(self._track_progress)
-        progress_row.append(Gtk.Label(label="Score"))
-        progress_row.append(self._track_score)
-        form.append(progress_row)
-
-        self._track_url_entry = Gtk.Entry()
-        self._track_url_entry.set_placeholder_text("Tracking URL (optional)")
-        form.append(self._track_url_entry)
-
-        self._track_note_entry = Gtk.Entry()
-        self._track_note_entry.set_placeholder_text("Note (optional)")
-        form.append(self._track_note_entry)
-
-        actions = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
-        save_btn = Gtk.Button(label="Save/Update")
-        save_btn.add_css_class("suggested-action")
-        save_btn.connect("clicked", self._save_tracking_from_dialog)
-        actions.append(save_btn)
-        load_btn = Gtk.Button(label="Load Provider")
-        load_btn.connect("clicked", self._load_tracking_provider_into_form)
-        actions.append(load_btn)
-        remove_btn = Gtk.Button(label="Remove Provider")
-        remove_btn.add_css_class("error")
-        remove_btn.connect("clicked", self._remove_tracking_provider_from_dialog)
-        actions.append(remove_btn)
-        layout.append(actions)
+        scroll = Gtk.ScrolledWindow()
+        scroll.set_vexpand(True)
+        scroll.set_child(self._track_body)
+        toolbar.set_content(scroll)
 
         self._track_status_label = Gtk.Label(label="")
         self._track_status_label.add_css_class("dim-label")
-        self._track_status_label.set_xalign(0)
-        layout.append(self._track_status_label)
+        self._track_status_label.set_wrap(True)
+        self._track_status_label.set_margin_start(16)
+        self._track_status_label.set_margin_end(16)
+        self._track_status_label.set_margin_bottom(8)
+        toolbar.add_bottom_bar(self._track_status_label)
 
-        self._track_list = Gtk.ListBox()
-        self._track_list.set_selection_mode(Gtk.SelectionMode.NONE)
-        self._track_list.add_css_class("boxed-list")
-        scroll = Gtk.ScrolledWindow()
-        scroll.set_vexpand(True)
-        scroll.set_child(self._track_list)
-        layout.append(scroll)
-
-        self._refresh_tracking_list_widget()
+        dialog.set_content(toolbar)
+        self._track_dialog = dialog
+        self._rebuild_tracking_sections()
         dialog.present()
 
-    def _save_tracking_from_dialog(self, *_):
-        if not self._manga or not self._manga.id:
+    def _rebuild_tracking_sections(self):
+        """Redraw every service section from the current local state."""
+        if not hasattr(self, "_track_body"):
             return
-        provider = self._track_provider_combo.get_active_text()
-        if not provider:
-            self._set_tracking_dialog_status("Provider is required.")
-            return
-        status = self._track_status_entry.get_text().strip()
-        progress = float(self._track_progress.get_value())
-        score = float(self._track_score.get_value())
-        url = self._track_url_entry.get_text().strip()
-        note = self._track_note_entry.get_text().strip()
-        try:
-            self._db.upsert_manga_tracking(
-                manga_id=self._manga.id,
-                provider=provider,
-                status=status,
-                progress=progress,
-                score=score,
-                url=url,
-                note=note,
-            )
-            self._set_tracking_dialog_status(f"Saved tracking for {provider}.")
-            self._refresh_tracking_summary()
-            self._refresh_tracking_list_widget()
-        except Exception as e:
-            self._set_tracking_dialog_status(f"Failed to save tracking: {e}")
 
-    def _remove_tracking_provider_from_dialog(self, *_):
-        if not self._manga or not self._manga.id:
-            return
-        provider = self._track_provider_combo.get_active_text()
-        if not provider:
-            return
-        self._db.remove_manga_tracking(self._manga.id, provider)
-        self._set_tracking_dialog_status(f"Removed tracking for {provider}.")
-        self._refresh_tracking_summary()
-        self._refresh_tracking_list_widget()
-
-    def _load_tracking_provider_into_form(self, *_):
-        provider = self._track_provider_combo.get_active_text()
-        if not provider:
-            return
-        row = self._tracking_cache.get(provider)
-        if not row:
-            self._set_tracking_dialog_status(f"No existing entry for {provider}.")
-            return
-        self._track_status_entry.set_text(row.get("status") or "")
-        self._track_progress.set_value(float(row.get("progress") or 0))
-        self._track_score.set_value(float(row.get("score") or 0))
-        self._track_url_entry.set_text(row.get("url") or "")
-        self._track_note_entry.set_text(row.get("note") or "")
-        self._set_tracking_dialog_status(f"Loaded {provider} entry.")
-
-    def _refresh_tracking_list_widget(self):
-        if not hasattr(self, "_track_list"):
-            return
-        child = self._track_list.get_first_child()
+        child = self._track_body.get_first_child()
         while child:
             nxt = child.get_next_sibling()
-            self._track_list.remove(child)
+            self._track_body.remove(child)
             child = nxt
-        if not self._manga or not self._manga.id:
-            return
-        rows = self._db.get_manga_tracking(self._manga.id)
-        self._tracking_cache = {r["provider"]: r for r in rows}
-        if not rows:
-            row = Adw.ActionRow(title="No tracking entries")
-            row.set_subtitle("Add one using the form above")
-            self._track_list.append(row)
-            return
-        for r in rows:
-            row = Adw.ActionRow(title=r["provider"])
-            row.set_subtitle(
-                f"status={r.get('status') or 'n/a'}  •  progress={float(r.get('progress') or 0):g}  •  score={float(r.get('score') or 0):g}"
+
+        manager = get_track_manager()
+        entries = {e.provider: e for e in manager.entries_for(self._manga.id)}
+        self._tracking_cache = entries
+
+        for service in manager.services:
+            self._track_body.append(
+                self._build_tracking_section(manager, service, entries.get(service.id))
             )
-            if r.get("url"):
-                open_btn = Gtk.Button(icon_name="web-browser-symbolic")
-                open_btn.add_css_class("flat")
-                open_btn.set_tooltip_text("Open tracker URL")
-                open_btn.connect("clicked", lambda *_b, url=r["url"]: webbrowser.open(url))
-                row.add_suffix(open_btn)
-            self._track_list.append(row)
+
+        pending = manager.queue.count()
+        if pending:
+            note = Gtk.Label(
+                label=f"{pending} update(s) waiting to be sent. They retry automatically."
+            )
+            note.add_css_class("dim-label")
+            note.set_wrap(True)
+            note.set_xalign(0)
+            self._track_body.append(note)
+
+    def _build_tracking_section(self, manager, service, entry):
+        group = Adw.PreferencesGroup(title=service.name)
+
+        if not service.is_logged_in:
+            row = Adw.ActionRow(
+                title="Not logged in",
+                subtitle=f"Log in to {service.name} from More \u2192 Tracking.",
+            )
+            group.add(row)
+            return group
+
+        if entry is None or not entry.remote_id:
+            row = Adw.ActionRow(
+                title="Not linked",
+                subtitle=f"Search {service.name} for a matching entry.",
+            )
+            link_btn = Gtk.Button(label="Search\u2026")
+            link_btn.add_css_class("suggested-action")
+            link_btn.set_valign(Gtk.Align.CENTER)
+            link_btn.connect(
+                "clicked", lambda *_b, sv=service: self._open_track_search(sv)
+            )
+            row.add_suffix(link_btn)
+            group.add(row)
+            return group
+
+        title_row = Adw.ActionRow(title=entry.title or "Linked entry")
+        total = f"{entry.total_chapters:g}" if entry.total_chapters else "?"
+        title_row.set_subtitle(f"{entry.progress:g} / {total} chapters")
+        if entry.url:
+            open_btn = Gtk.Button(icon_name="web-browser-symbolic")
+            open_btn.add_css_class("flat")
+            open_btn.set_valign(Gtk.Align.CENTER)
+            open_btn.set_tooltip_text("Open on the tracker")
+            open_btn.connect("clicked", lambda *_b, u=entry.url: webbrowser.open(u))
+            title_row.add_suffix(open_btn)
+        group.add(title_row)
+
+        status_row = Adw.ComboRow(title="Status")
+        status_model = Gtk.StringList()
+        for status in ALL_STATUSES:
+            status_model.append(STATUS_LABELS[status])
+        status_row.set_model(status_model)
+        if entry.status in ALL_STATUSES:
+            status_row.set_selected(ALL_STATUSES.index(entry.status))
+        status_row.connect(
+            "notify::selected",
+            lambda row, _p, sv=service, e=entry: self._on_track_status_changed(sv, e, row),
+        )
+        group.add(status_row)
+
+        progress_row = Adw.SpinRow.new_with_range(0, 100000, 1)
+        progress_row.set_title("Chapters read")
+        progress_row.set_value(entry.progress)
+        progress_row.connect(
+            "notify::value",
+            lambda row, _p, sv=service, e=entry: self._on_track_progress_changed(sv, e, row),
+        )
+        group.add(progress_row)
+
+        score_row = Adw.SpinRow.new_with_range(0, service.max_score, 0.5)
+        score_row.set_title("Score")
+        score_row.set_digits(1)
+        score_row.set_value(entry.score)
+        score_row.connect(
+            "notify::value",
+            lambda row, _p, sv=service, e=entry: self._on_track_score_changed(sv, e, row),
+        )
+        group.add(score_row)
+
+        actions_row = Adw.ActionRow(title="Manage")
+        refresh_btn = Gtk.Button(label="Refresh")
+        refresh_btn.set_valign(Gtk.Align.CENTER)
+        refresh_btn.set_tooltip_text("Pull the current state from the tracker")
+        refresh_btn.connect("clicked", lambda *_b, sv=service: self._on_track_refresh(sv))
+        actions_row.add_suffix(refresh_btn)
+
+        unlink_btn = Gtk.Button(label="Unlink")
+        unlink_btn.add_css_class("destructive-action")
+        unlink_btn.set_valign(Gtk.Align.CENTER)
+        unlink_btn.set_tooltip_text(
+            "Remove the local link. The entry on the tracker is left alone."
+        )
+        unlink_btn.connect("clicked", lambda *_b, sv=service: self._on_track_unlink(sv))
+        actions_row.add_suffix(unlink_btn)
+        group.add(actions_row)
+
+        return group
+
+    # ── Tracking actions ──────────────────────────────────────────────────
 
     def _set_tracking_dialog_status(self, text: str):
         if hasattr(self, "_track_status_label"):
             self._track_status_label.set_text(text)
+
+    def _run_tracking_task(self, description: str, work, on_done=None):
+        """Run a blocking tracker call off the main thread and report it."""
+        self._set_tracking_dialog_status(f"{description}\u2026")
+
+        def runner():
+            try:
+                result = work()
+            except Exception as exc:
+                GLib.idle_add(self._on_tracking_task_done, description, None, str(exc), on_done)
+                return
+            GLib.idle_add(self._on_tracking_task_done, description, result, None, on_done)
+
+        threading.Thread(target=runner, daemon=True).start()
+
+    def _on_tracking_task_done(self, description, result, error, on_done):
+        if error is not None:
+            self._set_tracking_dialog_status(f"{description} failed: {error}")
+            notify_error(self, f"{description} failed: {error}")
+            return False
+
+        self._set_tracking_dialog_status(f"{description} done.")
+        if on_done is not None:
+            on_done(result)
+        self._rebuild_tracking_sections()
+        self._refresh_tracking_summary()
+        return False
+
+    def _on_track_status_changed(self, service, entry, row):
+        status = ALL_STATUSES[row.get_selected()]
+        if status == entry.status:
+            return
+        updated = TrackEntry(**entry.__dict__)
+        updated.status = status
+        self._push_track_entry(service, updated, "Updating status")
+
+    def _on_track_progress_changed(self, service, entry, row):
+        progress = float(row.get_value())
+        if progress == entry.progress:
+            return
+        updated = TrackEntry(**entry.__dict__)
+        updated.progress = progress
+        self._push_track_entry(service, updated, "Updating progress")
+
+    def _on_track_score_changed(self, service, entry, row):
+        score = float(row.get_value())
+        if score == entry.score:
+            return
+        updated = TrackEntry(**entry.__dict__)
+        updated.score = score
+        self._push_track_entry(service, updated, "Updating score")
+
+    def _push_track_entry(self, service, entry, description):
+        manga_id = self._manga.id
+        self._run_tracking_task(
+            description,
+            lambda: get_track_manager().set_entry(manga_id, entry),
+        )
+
+    def _on_track_refresh(self, service):
+        manga_id = self._manga.id
+        self._run_tracking_task(
+            f"Refreshing {service.name}",
+            lambda: get_track_manager().pull(manga_id),
+        )
+
+    def _on_track_unlink(self, service):
+        manga_id = self._manga.id
+        self._run_tracking_task(
+            f"Unlinking {service.name}",
+            lambda: get_track_manager().unlink(manga_id, service.id),
+        )
+
+    def _open_track_search(self, service):
+        """Search the tracker for an entry to link this manga to."""
+        root = self.get_root()
+        dialog = Adw.Window(
+            transient_for=root,
+            modal=True,
+            title=f"Link on {service.name}",
+            default_width=520,
+            default_height=560,
+        )
+        toolbar = Adw.ToolbarView()
+        header = Adw.HeaderBar()
+        header.set_title_widget(Adw.WindowTitle(title=f"Link on {service.name}"))
+        toolbar.add_top_bar(header)
+
+        body = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
+        body.set_margin_start(16)
+        body.set_margin_end(16)
+        body.set_margin_top(16)
+        body.set_margin_bottom(16)
+
+        entry_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        query_entry = Gtk.SearchEntry()
+        query_entry.set_hexpand(True)
+        query_entry.set_text(self._manga.title or "")
+        entry_row.append(query_entry)
+        search_btn = Gtk.Button(label="Search")
+        search_btn.add_css_class("suggested-action")
+        entry_row.append(search_btn)
+        body.append(entry_row)
+
+        status = Gtk.Label(label="")
+        status.add_css_class("dim-label")
+        status.set_xalign(0)
+        status.set_wrap(True)
+        body.append(status)
+
+        results = Gtk.ListBox()
+        results.set_selection_mode(Gtk.SelectionMode.NONE)
+        results.add_css_class("boxed-list")
+        body.append(results)
+
+        scroll = Gtk.ScrolledWindow()
+        scroll.set_vexpand(True)
+        scroll.set_child(body)
+        toolbar.set_content(scroll)
+        dialog.set_content(toolbar)
+
+        def clear_results():
+            child = results.get_first_child()
+            while child:
+                nxt = child.get_next_sibling()
+                results.remove(child)
+                child = nxt
+
+        def on_results(found):
+            clear_results()
+            if not found:
+                status.set_text("No matches.")
+                return False
+            status.set_text(f"{len(found)} match(es). Pick one to link.")
+            for candidate in found:
+                row = Adw.ActionRow(title=candidate.title or "Untitled")
+                bits = []
+                if candidate.start_date:
+                    bits.append(candidate.start_date)
+                if candidate.total_chapters:
+                    bits.append(f"{candidate.total_chapters:g} chapters")
+                if candidate.publishing_status:
+                    bits.append(candidate.publishing_status)
+                row.set_subtitle("  \u2022  ".join(bits))
+
+                link_btn = Gtk.Button(label="Link")
+                link_btn.add_css_class("suggested-action")
+                link_btn.set_valign(Gtk.Align.CENTER)
+                link_btn.connect(
+                    "clicked",
+                    lambda *_b, c=candidate: (
+                        dialog.close(),
+                        self._link_track_entry(service, c),
+                    ),
+                )
+                row.add_suffix(link_btn)
+                results.append(row)
+            return False
+
+        def on_error(message):
+            clear_results()
+            status.set_text(f"Search failed: {message}")
+            return False
+
+        def do_search(*_):
+            query = query_entry.get_text().strip()
+            if not query:
+                return
+            status.set_text("Searching\u2026")
+            clear_results()
+
+            def work():
+                try:
+                    found = service.search(query)
+                except Exception as exc:
+                    GLib.idle_add(on_error, str(exc))
+                    return
+                GLib.idle_add(on_results, found)
+
+            threading.Thread(target=work, daemon=True).start()
+
+        search_btn.connect("clicked", do_search)
+        query_entry.connect("activate", do_search)
+
+        dialog.present()
+        do_search()
+
+    def _link_track_entry(self, service, candidate):
+        manga_id = self._manga.id
+        self._run_tracking_task(
+            f"Linking to {candidate.title}",
+            lambda: get_track_manager().link(manga_id, service.id, candidate.remote_id),
+        )
 
     def _open_migration_dialog(self, *_):
         if not self._manga:
@@ -1212,6 +1469,31 @@ class MangaDetailView(Gtk.Box):
                 ch.read = True
         self._render_chapters()
 
+    def _sort_chapters(self, chapters):
+        """
+        Order chapters by the selected mode.
+
+        "Descending" always means the direction a reader expects for that
+        mode: newest chapter first. Source order is already newest-first as
+        the source returned it, so descending leaves it alone.
+        """
+        if self._chapter_sort == "source":
+            ordered = sorted(chapters, key=lambda c: c.source_order)
+            return ordered if self._sort_descending else list(reversed(ordered))
+
+        if self._chapter_sort == "upload":
+            key = lambda c: (c.uploaded_at or 0, c.chapter_number)
+        else:
+            key = lambda c: (c.chapter_number, c.source_order)
+
+        return sorted(chapters, key=key, reverse=self._sort_descending)
+
+    def _set_chapter_sort(self, btn, mode):
+        if not btn.get_active() or mode == self._chapter_sort:
+            return
+        self._chapter_sort = mode
+        self._render_chapters()
+
     def _toggle_sort(self, btn):
         self._sort_descending = btn.get_active()
         self._render_chapters()
@@ -1227,7 +1509,7 @@ class MangaDetailView(Gtk.Box):
                 dm = get_download_manager()
                 dm.enqueue(self._manga, chapter, pages)
             except Exception as e:
-                print(f"[detail] Download error: {e}")
+                logger.error("download error: %s", e)
 
         threading.Thread(target=fetch_and_queue, daemon=True).start()
 

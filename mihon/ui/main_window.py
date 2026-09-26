@@ -5,7 +5,10 @@ Uses Adw.NavigationSplitView for responsive layout.
 import gi
 gi.require_version("Gtk", "4.0")
 gi.require_version("Adw", "1")
-from gi.repository import Gtk, Adw, GLib, GObject
+from gi.repository import Gtk, Adw, GLib, GObject, Gio
+import threading
+import webbrowser
+from pathlib import Path
 from ..core.models import Manga, Chapter
 from ..core.http_client import set_challenge_solver
 from .library import LibraryView
@@ -14,6 +17,13 @@ from .updates import UpdatesView
 from .manga_detail import MangaDetailView
 from .reader import ReaderView
 from .challenge_solver import WebKitCookieSolver
+from ..core.database import get_db
+from ..core.tracking import get_track_manager
+from ..extensions.repo_manager import get_repo_manager
+from .notify import notify, notify_error
+import logging
+
+logger = logging.getLogger("main_window")
 
 
 class MainWindow(Adw.ApplicationWindow):
@@ -26,6 +36,7 @@ class MainWindow(Adw.ApplicationWindow):
 
         self._navigation_stack = []  # For back navigation
         self._build_ui()
+        self._setup_shortcuts()
         self._challenge_solver = WebKitCookieSolver(self)
         set_challenge_solver(self._challenge_solver.solve)
 
@@ -109,7 +120,11 @@ class MainWindow(Adw.ApplicationWindow):
         self._reader_page.set_tag("reader")
         self._nav_view.add(self._reader_page)
 
-        self.set_content(self._nav_view)
+        # Every toast in the app lands here; mihon.ui.notify finds it by
+        # walking up from whichever widget raised the message.
+        self.toast_overlay = Adw.ToastOverlay()
+        self.toast_overlay.set_child(self._nav_view)
+        self.set_content(self.toast_overlay)
 
     def _on_tab_changed(self, stack, param):
         current = stack.get_visible_child_name()
@@ -332,6 +347,148 @@ class MainWindow(Adw.ApplicationWindow):
         unread_row.set_active(True)
         lib_group.add(unread_row)
 
+        # Data group: backup / restore
+        data_group = Adw.PreferencesGroup(
+            title="Data",
+            description="Move your library between this app and Mihon on Android.",
+        )
+        content.append(data_group)
+
+        import_row = Adw.ActionRow(
+            title="Import .tachibk backup",
+            subtitle="Restore your library, categories, and chapter metadata from an Android Mihon backup file.",
+        )
+        import_btn = Gtk.Button(label="Choose File…")
+        import_btn.add_css_class("suggested-action")
+        import_btn.set_valign(Gtk.Align.CENTER)
+        import_btn.connect("clicked", self._on_import_tachibk_clicked)
+        import_row.add_suffix(import_btn)
+        import_row.set_activatable_widget(import_btn)
+        data_group.add(import_row)
+
+        export_row = Adw.ActionRow(
+            title="Export .tachibk backup",
+            subtitle="Write your library, categories, and chapter progress to a file Android Mihon can restore.",
+        )
+        export_btn = Gtk.Button(label="Save As…")
+        export_btn.set_valign(Gtk.Align.CENTER)
+        export_btn.connect("clicked", self._on_export_tachibk_clicked)
+        export_row.add_suffix(export_btn)
+        export_row.set_activatable_widget(export_btn)
+        data_group.add(export_row)
+
+        cache_row = Adw.ActionRow(
+            title="Clear page cache",
+            subtitle="Delete cached chapter images. Covers and downloads are kept.",
+        )
+        self._cache_size_label = Gtk.Label()
+        self._cache_size_label.add_css_class("dim-label")
+        self._cache_size_label.set_valign(Gtk.Align.CENTER)
+        cache_row.add_suffix(self._cache_size_label)
+
+        clear_cache_btn = Gtk.Button(label="Clear")
+        clear_cache_btn.add_css_class("destructive-action")
+        clear_cache_btn.set_valign(Gtk.Align.CENTER)
+        clear_cache_btn.connect("clicked", self._on_clear_page_cache)
+        cache_row.add_suffix(clear_cache_btn)
+        data_group.add(cache_row)
+        self._refresh_cache_size()
+
+        # Local source
+        local_group = Adw.PreferencesGroup(
+            title="Local source",
+            description=(
+                "Read your own CBZ/ZIP archives and image folders. One folder per "
+                "series, chapters inside it."
+            ),
+        )
+        content.append(local_group)
+
+        self._local_dir_row = Adw.ActionRow(title="Library folder")
+        self._local_dir_row.set_subtitle_lines(2)
+        choose_btn = Gtk.Button(label="Choose\u2026")
+        choose_btn.set_valign(Gtk.Align.CENTER)
+        choose_btn.connect("clicked", self._on_choose_local_dir)
+        self._local_dir_row.add_suffix(choose_btn)
+        self._local_dir_row.set_activatable_widget(choose_btn)
+        local_group.add(self._local_dir_row)
+
+        scan_row = Adw.ActionRow(
+            title="Rescan",
+            subtitle="Pick up series added to the folder since the app started.",
+        )
+        scan_btn = Gtk.Button(label="Rescan")
+        scan_btn.set_valign(Gtk.Align.CENTER)
+        scan_btn.connect("clicked", self._on_rescan_local)
+        scan_row.add_suffix(scan_btn)
+        local_group.add(scan_row)
+        self._refresh_local_dir_row()
+
+        # Extension repositories
+        repo_group = Adw.PreferencesGroup(
+            title="Extension repositories",
+            description=(
+                "Sources of installable extensions. Each repository publishes an "
+                "index.json listing what it offers."
+            ),
+        )
+        content.append(repo_group)
+
+        self._repo_list_group = repo_group
+        self._repo_rows = []
+
+        add_repo_row = Adw.EntryRow(title="Add a repository URL")
+        add_repo_row.set_show_apply_button(True)
+        add_repo_row.connect("apply", self._on_add_repo)
+        repo_group.add(add_repo_row)
+        self._add_repo_row = add_repo_row
+        self._refresh_repo_rows()
+
+        # Tracking group: per-service client ID and login
+        track_group = Adw.PreferencesGroup(
+            title="Tracking",
+            description=(
+                "Keep AniList and MyAnimeList up to date as you read. Each service "
+                "needs an API client you create yourself — a desktop app cannot ship "
+                "a shared secret."
+            ),
+        )
+        content.append(track_group)
+        self._tracking_rows = {}
+
+        manager = get_track_manager()
+        for service in manager.services:
+            track_group.add(self._build_tracker_row(service))
+
+        self._tracking_queue_row = Adw.ActionRow(
+            title="Pending updates",
+            subtitle="Tracker updates that could not be sent yet. They retry automatically.",
+        )
+        self._tracking_queue_label = Gtk.Label()
+        self._tracking_queue_label.add_css_class("dim-label")
+        self._tracking_queue_label.set_valign(Gtk.Align.CENTER)
+        self._tracking_queue_row.add_suffix(self._tracking_queue_label)
+
+        retry_btn = Gtk.Button(label="Retry now")
+        retry_btn.set_valign(Gtk.Align.CENTER)
+        retry_btn.connect("clicked", self._on_retry_tracking_queue)
+        self._tracking_queue_row.add_suffix(retry_btn)
+        track_group.add(self._tracking_queue_row)
+
+        storage_row = Adw.ActionRow(title="Token storage")
+        storage_label = Gtk.Label(label=getattr(manager, "credentials", None)
+                                  and manager.credentials.backend_name or "unknown")
+        storage_label.add_css_class("dim-label")
+        storage_label.set_valign(Gtk.Align.CENTER)
+        storage_row.add_suffix(storage_label)
+        if getattr(manager, "credentials", None) and not manager.credentials.uses_keyring:
+            storage_row.set_subtitle(
+                "No system keyring is available, so tokens are stored unencrypted "
+                "in the app database."
+            )
+        track_group.add(storage_row)
+        self._refresh_tracking_queue_label()
+
         # About group
         about_group = Adw.PreferencesGroup(title="About")
         content.append(about_group)
@@ -388,3 +545,646 @@ class MainWindow(Adw.ApplicationWindow):
 
             row.set_child(box)
             self._downloads_list.append(row)
+
+    # ── Local source ──────────────────────────────────────────────────────
+
+    def _local_source(self):
+        from ..extensions.registry import get_registry
+        from ..extensions.local import SOURCE_ID
+        return get_registry().get(SOURCE_ID)
+
+    def _refresh_local_dir_row(self):
+        source = self._local_source()
+        if source is None:
+            self._local_dir_row.set_subtitle("The local source is unavailable.")
+            return
+
+        root = source.root
+        if root.is_dir():
+            self._local_dir_row.set_subtitle(str(root))
+        else:
+            self._local_dir_row.set_subtitle(f"{root} — this folder does not exist yet")
+
+    def _on_choose_local_dir(self, button):
+        dialog = Gtk.FileDialog()
+        dialog.set_title("Choose your local manga folder")
+        dialog.select_folder(self, None, self._on_local_dir_chosen)
+
+    def _on_local_dir_chosen(self, dialog, result):
+        try:
+            folder = dialog.select_folder_finish(result)
+        except Exception as e:
+            if "Dismissed" not in str(e):
+                notify_error(self, str(e))
+            return
+        if folder is None:
+            return
+
+        source = self._local_source()
+        if source is None:
+            return
+
+        source.set_root(folder.get_path())
+        self._refresh_local_dir_row()
+        notify(self, f"Local library set to {folder.get_path()}.")
+        self._reload_browse_sources()
+
+    def _on_rescan_local(self, button):
+        # The source reads the folder on every call, so a rescan is just a
+        # reload of whatever is showing it.
+        self._reload_browse_sources()
+        notify(self, "Rescanned the local library folder.")
+
+    def _reload_browse_sources(self):
+        browse = getattr(self, "_browse_view", None)
+        reload_sources = getattr(browse, "reload_sources", None)
+        if callable(reload_sources):
+            reload_sources()
+
+    # ── Extension repositories ────────────────────────────────────────────
+
+    def _refresh_repo_rows(self):
+        """Redraw one row per configured repository."""
+        for row in self._repo_rows:
+            self._repo_list_group.remove(row)
+        self._repo_rows = []
+
+        manager = get_repo_manager()
+        repos = manager.get_repos()
+        if not repos:
+            row = Adw.ActionRow(
+                title="No repositories configured",
+                subtitle="Add one above to browse installable extensions.",
+            )
+            self._repo_list_group.add(row)
+            self._repo_rows.append(row)
+            return
+
+        for url in repos:
+            row = Adw.ActionRow(title=url)
+            row.set_subtitle_lines(2)
+
+            remove_btn = Gtk.Button(icon_name="user-trash-symbolic")
+            remove_btn.add_css_class("flat")
+            remove_btn.set_valign(Gtk.Align.CENTER)
+            remove_btn.set_tooltip_text("Remove this repository")
+            remove_btn.connect("clicked", self._on_remove_repo, url)
+            row.add_suffix(remove_btn)
+
+            self._repo_list_group.add(row)
+            self._repo_rows.append(row)
+
+    def _on_add_repo(self, entry):
+        url = entry.get_text().strip()
+        if not url:
+            return
+        if get_repo_manager().add_repo(url):
+            entry.set_text("")
+            self._refresh_repo_rows()
+            notify(self, "Repository added. Refresh the Extensions tab to see it.")
+            self._reload_browse_repos()
+        else:
+            notify_error(
+                self,
+                "Could not add that repository. It must be an http:// or https:// "
+                "URL, and not one already configured.",
+            )
+
+    def _on_remove_repo(self, _button, url):
+        if get_repo_manager().remove_repo(url):
+            self._refresh_repo_rows()
+            notify(self, "Repository removed.")
+            self._reload_browse_repos()
+
+    def _reload_browse_repos(self):
+        """Re-fetch the available extension list after the repo set changed."""
+        browse = getattr(self, "_browse_view", None)
+        reload_available = getattr(browse, "reload_available", None)
+        if callable(reload_available):
+            reload_available()
+
+    # ── Tracking ──────────────────────────────────────────────────────────
+
+    def _build_tracker_row(self, service) -> Adw.ExpanderRow:
+        """A collapsible row holding one service's client ID and login state."""
+        row = Adw.ExpanderRow(title=service.name)
+
+        state = Gtk.Label()
+        state.add_css_class("dim-label")
+        state.set_valign(Gtk.Align.CENTER)
+        row.add_suffix(state)
+
+        client_row = Adw.EntryRow(title="Client ID")
+        client_row.set_text(getattr(service, "client_id", "") or "")
+        client_row.connect(
+            "apply", lambda entry, sv=service: self._on_tracker_client_id(sv, entry)
+        )
+        client_row.set_show_apply_button(True)
+        row.add_row(client_row)
+
+        login_row = Adw.ActionRow(
+            title="Account",
+            subtitle=(
+                "Opens the service in your browser, then asks for the code it "
+                "shows you."
+            ),
+        )
+        login_btn = Gtk.Button(label="Log in")
+        login_btn.add_css_class("suggested-action")
+        login_btn.set_valign(Gtk.Align.CENTER)
+        login_btn.connect("clicked", lambda *_b, sv=service: self._on_tracker_login(sv))
+        login_row.add_suffix(login_btn)
+
+        logout_btn = Gtk.Button(label="Log out")
+        logout_btn.add_css_class("destructive-action")
+        logout_btn.set_valign(Gtk.Align.CENTER)
+        logout_btn.connect("clicked", lambda *_b, sv=service: self._on_tracker_logout(sv))
+        login_row.add_suffix(logout_btn)
+        row.add_row(login_row)
+
+        self._tracking_rows[service.id] = {
+            "row": row,
+            "state": state,
+            "client": client_row,
+            "login": login_btn,
+            "logout": logout_btn,
+        }
+        self._refresh_tracker_row(service)
+        return row
+
+    def _refresh_tracker_row(self, service):
+        widgets = self._tracking_rows.get(service.id)
+        if widgets is None:
+            return
+
+        configured = getattr(service, "is_configured", True)
+        logged_in = service.is_logged_in
+
+        if not configured:
+            widgets["state"].set_text("Client ID needed")
+        elif logged_in:
+            widgets["state"].set_text("Logged in")
+        else:
+            widgets["state"].set_text("Logged out")
+
+        widgets["login"].set_sensitive(configured and not logged_in)
+        widgets["logout"].set_sensitive(logged_in)
+
+    def _on_tracker_client_id(self, service, entry):
+        from ..core.tracking.anilist import SETTING_CLIENT_ID as ANILIST_KEY
+        from ..core.tracking.myanimelist import SETTING_CLIENT_ID as MAL_KEY
+
+        key = ANILIST_KEY if service.id == "anilist" else MAL_KEY
+        get_db().set_setting(key, entry.get_text().strip())
+        self._refresh_tracker_row(service)
+        notify(self, f"Saved the {service.name} client ID.")
+
+    def _on_tracker_login(self, service):
+        """
+        Start the browser login, then ask for whatever the service showed.
+
+        Both AniList's implicit grant and MyAnimeList's PKCE flow hand the
+        user a value in the browser rather than calling back to a local
+        server, so the code is pasted in here.
+        """
+        try:
+            url = service.authorization_url()
+        except Exception as exc:
+            notify_error(self, str(exc))
+            return
+
+        try:
+            webbrowser.open(url)
+        except Exception as exc:
+            notify_error(self, f"Could not open your browser: {exc}")
+            return
+
+        dialog = Adw.MessageDialog(
+            transient_for=self,
+            modal=True,
+            heading=f"Finish {service.name} login",
+            body=(
+                f"{service.name} opened in your browser. Approve the request, then "
+                "paste the code or the full redirect URL below."
+            ),
+        )
+        entry = Gtk.Entry()
+        entry.set_placeholder_text("Code or redirect URL")
+        entry.set_margin_start(12)
+        entry.set_margin_end(12)
+        entry.set_margin_bottom(12)
+        dialog.set_extra_child(entry)
+        dialog.add_response("cancel", "Cancel")
+        dialog.add_response("ok", "Log in")
+        dialog.set_response_appearance("ok", Adw.ResponseAppearance.SUGGESTED)
+        dialog.set_default_response("ok")
+        dialog.connect(
+            "response",
+            lambda d, response, sv=service, e=entry: self._on_tracker_login_response(
+                sv, response, e.get_text()
+            ),
+        )
+        dialog.present()
+
+    def _on_tracker_login_response(self, service, response, value):
+        if response != "ok" or not value.strip():
+            return
+
+        def work():
+            try:
+                ok = service.complete_login(value)
+            except Exception as exc:
+                GLib.idle_add(self._on_tracker_login_done, service, False, str(exc))
+                return
+            GLib.idle_add(self._on_tracker_login_done, service, ok, None)
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def _on_tracker_login_done(self, service, ok, error):
+        if error is not None:
+            notify_error(self, f"{service.name} login failed: {error}")
+        elif not ok:
+            notify_error(self, f"{service.name} login failed: no code was provided.")
+        else:
+            notify(self, f"Logged in to {service.name}.")
+            # A successful login is the moment queued updates can go out.
+            threading.Thread(
+                target=lambda: get_track_manager().process_queue(), daemon=True
+            ).start()
+
+        self._refresh_tracker_row(service)
+        self._refresh_tracking_queue_label()
+        return False
+
+    def _on_tracker_logout(self, service):
+        service.logout()
+        self._refresh_tracker_row(service)
+        notify(self, f"Logged out of {service.name}.")
+
+    def _refresh_tracking_queue_label(self):
+        def work():
+            try:
+                pending = get_track_manager().queue.count()
+            except Exception:
+                pending = 0
+            GLib.idle_add(
+                self._tracking_queue_label.set_text,
+                "None" if not pending else f"{pending} waiting",
+            )
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def _on_retry_tracking_queue(self, button):
+        button.set_sensitive(False)
+
+        def work():
+            try:
+                delivered = get_track_manager().process_queue()
+            except Exception as exc:
+                GLib.idle_add(self._on_queue_retried, button, None, str(exc))
+                return
+            GLib.idle_add(self._on_queue_retried, button, delivered, None)
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def _on_queue_retried(self, button, delivered, error):
+        button.set_sensitive(True)
+        if error is not None:
+            notify_error(self, f"Could not send pending updates: {error}")
+        elif delivered:
+            notify(self, f"Sent {delivered} pending tracker update(s).")
+        else:
+            notify(self, "No pending updates were ready to send.")
+        self._refresh_tracking_queue_label()
+        return False
+
+    # ── Page cache ────────────────────────────────────────────────────────
+
+    @staticmethod
+    def _format_bytes(size: int) -> str:
+        for unit in ("B", "KB", "MB", "GB"):
+            if size < 1024 or unit == "GB":
+                return f"{size:.0f} {unit}" if unit == "B" else f"{size:.1f} {unit}"
+            size /= 1024
+        return f"{size:.1f} GB"
+
+    def _refresh_cache_size(self):
+        def work():
+            from ..core import disk_cache
+            try:
+                size = disk_cache.cache_size(disk_cache.KIND_PAGE)
+            except Exception:
+                size = 0
+            GLib.idle_add(self._cache_size_label.set_text, self._format_bytes(size))
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def _on_clear_page_cache(self, button):
+        from ..core import disk_cache, image_loader
+
+        button.set_sensitive(False)
+
+        def work():
+            try:
+                freed = disk_cache.clear(disk_cache.KIND_PAGE)
+            except Exception as exc:
+                GLib.idle_add(self._on_cache_cleared, button, None, str(exc))
+                return
+            GLib.idle_add(self._on_cache_cleared, button, freed, None)
+
+        image_loader.clear_cache()
+        threading.Thread(target=work, daemon=True).start()
+
+    def _on_cache_cleared(self, button, freed, error):
+        button.set_sensitive(True)
+        if error is not None:
+            notify_error(self, f"Could not clear the page cache: {error}")
+        else:
+            notify(self, f"Freed {self._format_bytes(freed)} of cached pages.")
+        self._refresh_cache_size()
+        return False
+
+    # ── Shortcuts ─────────────────────────────────────────────────────────
+
+    #: Accelerator -> (handler name, description) for the shortcuts window.
+    SHORTCUTS = (
+        ("<Control>k", "_on_global_search_shortcut", "Global search"),
+        ("slash", "_on_global_search_shortcut", "Global search"),
+        ("<Control>r", "_on_refresh_shortcut", "Refresh the current tab"),
+        ("F5", "_on_refresh_shortcut", "Refresh the current tab"),
+        ("<Control>1", "_on_tab_shortcut_1", "Library"),
+        ("<Control>2", "_on_tab_shortcut_2", "Updates"),
+        ("<Control>3", "_on_tab_shortcut_3", "History"),
+        ("<Control>4", "_on_tab_shortcut_4", "Browse"),
+        ("<Control>5", "_on_tab_shortcut_5", "More"),
+        ("<Control>question", "_on_shortcuts_window", "Show these shortcuts"),
+        ("<Control>w", "_on_back_shortcut", "Back"),
+    )
+
+    #: Tab order, matching Ctrl+1 through Ctrl+5.
+    TAB_ORDER = ("library", "updates", "history", "browse", "more")
+
+    def _setup_shortcuts(self):
+        """Install the window-wide accelerators listed in SHORTCUTS."""
+        controller = Gtk.ShortcutController()
+        controller.set_scope(Gtk.ShortcutScope.GLOBAL)
+
+        for accelerator, handler_name, _description in self.SHORTCUTS:
+            handler = getattr(self, handler_name)
+            trigger = Gtk.ShortcutTrigger.parse_string(accelerator)
+            if trigger is None:
+                logger.warning("could not parse the accelerator %s", accelerator)
+                continue
+            controller.add_shortcut(
+                Gtk.Shortcut(
+                    trigger=trigger,
+                    action=Gtk.CallbackAction.new(handler),
+                )
+            )
+
+        self.add_controller(controller)
+
+    def _on_global_search_shortcut(self, *_):
+        self._tab_stack.set_visible_child_name("browse")
+        self._browse_view.focus_global_search()
+        return True
+
+    def _on_refresh_shortcut(self, *_):
+        """Reload whichever tab is showing."""
+        current = self._tab_stack.get_visible_child_name()
+        if current == "library":
+            self._library_view.reload()
+        elif current == "updates":
+            self._updates_view.refresh_cached()
+        elif current == "history":
+            refresh = getattr(self._history_view, "reload", None)
+            if callable(refresh):
+                refresh()
+        elif current == "browse":
+            self._browse_view.reload_sources()
+        return True
+
+    def _switch_to_tab(self, index: int) -> bool:
+        if 0 <= index < len(self.TAB_ORDER):
+            self._tab_stack.set_visible_child_name(self.TAB_ORDER[index])
+        return True
+
+    # One handler per accelerator: Gtk.CallbackAction passes no user data, so
+    # the index cannot be bound through the shortcut itself.
+    def _on_tab_shortcut_1(self, *_):
+        return self._switch_to_tab(0)
+
+    def _on_tab_shortcut_2(self, *_):
+        return self._switch_to_tab(1)
+
+    def _on_tab_shortcut_3(self, *_):
+        return self._switch_to_tab(2)
+
+    def _on_tab_shortcut_4(self, *_):
+        return self._switch_to_tab(3)
+
+    def _on_tab_shortcut_5(self, *_):
+        return self._switch_to_tab(4)
+
+    def _on_back_shortcut(self, *_):
+        """Pop one page off the navigation stack, if there is one."""
+        try:
+            self._nav_view.pop()
+        except Exception:
+            pass
+        return True
+
+    def _on_shortcuts_window(self, *_):
+        self._show_shortcuts_window()
+        return True
+
+    def _show_shortcuts_window(self):
+        """
+        Build the standard GTK shortcuts overlay from SHORTCUTS.
+
+        Accelerators that share a handler (Ctrl+K and /) are listed once with
+        both keys, which is how the overlay expects alternatives.
+        """
+        window = Gtk.ShortcutsWindow(transient_for=self, modal=True)
+        section = Gtk.ShortcutsSection(section_name="main", max_height=12)
+
+        grouped = {}
+        order = []
+        for accelerator, handler_name, description in self.SHORTCUTS:
+            if description not in grouped:
+                grouped[description] = []
+                order.append(description)
+            grouped[description].append(accelerator)
+
+        group = Gtk.ShortcutsGroup(title="Mihon")
+        for description in order:
+            group.add_shortcut(Gtk.ShortcutsShortcut(
+                title=description,
+                accelerator=" ".join(grouped[description]),
+            ))
+        section.add_group(group)
+
+        reader_group = Gtk.ShortcutsGroup(title="Reader")
+        for title, accelerator in (
+            ("Next page", "Right space"),
+            ("Previous page", "Left BackSpace"),
+            ("Close the reader", "Escape"),
+        ):
+            reader_group.add_shortcut(
+                Gtk.ShortcutsShortcut(title=title, accelerator=accelerator)
+            )
+        section.add_group(reader_group)
+
+        window.add_section(section)
+        window.present()
+
+    # ── Backup / restore ──────────────────────────────────────────────────
+
+    @staticmethod
+    def _tachibk_filters():
+        """A filter model matching .tachibk plus an all-files escape hatch."""
+        tachibk = Gtk.FileFilter()
+        tachibk.set_name("Mihon Android backup")
+        tachibk.add_pattern("*.tachibk")
+
+        any_file = Gtk.FileFilter()
+        any_file.set_name("All files")
+        any_file.add_pattern("*")
+
+        model = Gio.ListStore(item_type=Gtk.FileFilter)
+        model.append(tachibk)
+        model.append(any_file)
+        return model, tachibk
+
+    def _show_message(self, heading: str, body: str):
+        dialog = Adw.MessageDialog(
+            transient_for=self,
+            modal=True,
+            heading=heading,
+            body=body,
+        )
+        dialog.add_response("ok", "OK")
+        dialog.set_default_response("ok")
+        dialog.set_close_response("ok")
+        dialog.present()
+
+    def _busy_dialog(self, heading: str, body: str):
+        dialog = Adw.MessageDialog(
+            transient_for=self,
+            modal=True,
+            heading=heading,
+            body=body,
+        )
+        dialog.present()
+        return dialog
+
+    def _on_import_tachibk_clicked(self, button):
+        dialog = Gtk.FileDialog()
+        dialog.set_title("Select .tachibk backup file")
+        filters, default_filter = self._tachibk_filters()
+        dialog.set_filters(filters)
+        dialog.set_default_filter(default_filter)
+        dialog.open(self, None, self._on_import_file_chosen)
+
+    def _on_import_file_chosen(self, dialog, result):
+        try:
+            file = dialog.open_finish(result)
+        except Exception as e:
+            # The user dismissing the chooser is not an error worth reporting.
+            if "Dismissed" not in str(e):
+                self._show_message("Import failed", str(e))
+            return
+        if file is None:
+            return
+
+        path = Path(file.get_path())
+        busy = self._busy_dialog(
+            "Importing backup",
+            f"Reading {path.name}. This can take a while for a large library.",
+        )
+
+        def work():
+            from ..core.tachibk_importer import import_tachibk
+            try:
+                result = import_tachibk(path, apply=True)
+            except Exception as exc:
+                GLib.idle_add(self._on_import_done, busy, None, str(exc))
+                return
+            GLib.idle_add(self._on_import_done, busy, result, None)
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def _on_import_done(self, busy, result, error):
+        busy.close()
+        if error is not None:
+            self._show_message("Import failed", error)
+            return False
+        if result is None or not result.ok:
+            errors = "\n".join(result.errors) if result else "Unknown error"
+            self._show_message("Import failed", errors)
+            return False
+
+        self._show_message("Import complete", result.summary())
+        notify(self, result.summary())
+        self._refresh_after_import()
+        return False
+
+    def _refresh_after_import(self):
+        """Pull the newly imported rows into the views that are already built."""
+        try:
+            self._library_view.reload()
+        except Exception as exc:
+            logger.error("library reload after import failed: %s", exc)
+        try:
+            self._updates_view.refresh_cached()
+        except Exception as exc:
+            logger.error("updates refresh after import failed: %s", exc)
+
+    def _on_export_tachibk_clicked(self, button):
+        from ..core.tachibk_exporter import default_backup_name
+
+        dialog = Gtk.FileDialog()
+        dialog.set_title("Save .tachibk backup")
+        dialog.set_initial_name(default_backup_name())
+        filters, default_filter = self._tachibk_filters()
+        dialog.set_filters(filters)
+        dialog.set_default_filter(default_filter)
+        dialog.save(self, None, self._on_export_file_chosen)
+
+    def _on_export_file_chosen(self, dialog, result):
+        try:
+            file = dialog.save_finish(result)
+        except Exception as e:
+            if "Dismissed" not in str(e):
+                self._show_message("Export failed", str(e))
+            return
+        if file is None:
+            return
+
+        path = Path(file.get_path())
+        busy = self._busy_dialog(
+            "Exporting backup",
+            f"Writing {path.name}.",
+        )
+
+        def work():
+            from ..core.tachibk_exporter import export_tachibk
+            try:
+                result = export_tachibk(path)
+            except Exception as exc:
+                GLib.idle_add(self._on_export_done, busy, None, str(exc))
+                return
+            GLib.idle_add(self._on_export_done, busy, result, None)
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def _on_export_done(self, busy, result, error):
+        busy.close()
+        if error is not None:
+            self._show_message("Export failed", error)
+            return False
+        if result is None or not result.ok:
+            self._show_message("Export failed", result.summary() if result else "Unknown error")
+            return False
+        self._show_message("Export complete", f"{result.summary()}\n\nSaved to {result.path}")
+        return False
