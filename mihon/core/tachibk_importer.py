@@ -25,6 +25,7 @@ from google.protobuf import descriptor_pb2, descriptor_pool, message_factory, te
 
 from .database import get_db
 from .models import Manga, ReadingStatus
+from .source_ids import to_local_id
 
 logger = logging.getLogger("tachibk_importer")
 
@@ -232,19 +233,29 @@ def parse_backup(path: Path) -> RestoredBackup:
 
 
 def _status_to_string(status: int) -> str:
+    """
+    Map Android's `SManga` status enum onto the local string status.
+
+    0 is UNKNOWN, not ONGOING — an earlier version of this map was shifted by
+    one, which reported every ongoing series as completed.
+    """
     return {
-        0: "ongoing",
-        1: "completed",
-        2: "licensed",
-        3: "publishing finished",
-        4: "cancelled",
-        5: "on hiatus",
+        0: "",
+        1: "ongoing",
+        2: "completed",
+        3: "licensed",
+        4: "publishing finished",
+        5: "cancelled",
+        6: "on hiatus",
     }.get(status, "")
 
 
 def _manga_to_library(manga: RestoredManga) -> Manga:
     return Manga(
-        source_id=f"mihon:{manga.source}",
+        # A backup this app exported carries the numeric id of a built-in
+        # source, so map it back to that source's name. Otherwise re-importing
+        # our own backup would add a second copy of every manga.
+        source_id=to_local_id(manga.source),
         source_manga_id=manga.url,
         title=manga.title,
         alt_titles=[],
