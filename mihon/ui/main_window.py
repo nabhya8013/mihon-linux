@@ -326,30 +326,53 @@ class MainWindow(Adw.ApplicationWindow):
         dl_group.add(dl_path_row)
 
         # Reader settings group
-        reader_group = Adw.PreferencesGroup(title="Reader")
+        reader_group = Adw.PreferencesGroup(
+            title="Reader",
+            description="Defaults for new chapters. Changing direction/layout/background from the reader toolbar updates these too.",
+        )
         content.append(reader_group)
 
+        db = get_db()
+
+        self._DIRECTION_VALUES = ["rtl", "ltr", "vertical", "webtoon"]
         dir_row = Adw.ComboRow(title="Default Reading Direction")
         dir_model = Gtk.StringList.new(["Right to Left (RTL)", "Left to Right (LTR)", "Vertical", "Webtoon"])
         dir_row.set_model(dir_model)
-        dir_row.set_selected(0)
+        current_direction = db.get_setting("reading_direction", "rtl")
+        dir_row.set_selected(
+            self._DIRECTION_VALUES.index(current_direction)
+            if current_direction in self._DIRECTION_VALUES else 0
+        )
+        dir_row.connect("notify::selected", self._on_default_direction_changed)
         reader_group.add(dir_row)
 
+        self._LAYOUT_VALUES = ["single", "double", "auto"]
         layout_row = Adw.ComboRow(title="Page Layout")
-        layout_model = Gtk.StringList.new(["Single Page", "Double Page"])
+        layout_model = Gtk.StringList.new(["Single Page", "Double Page", "Auto"])
         layout_row.set_model(layout_model)
+        current_layout = db.get_setting("page_layout", "single")
+        layout_row.set_selected(
+            self._LAYOUT_VALUES.index(current_layout)
+            if current_layout in self._LAYOUT_VALUES else 0
+        )
+        layout_row.connect("notify::selected", self._on_default_layout_changed)
         reader_group.add(layout_row)
 
+        self._BG_VALUES = ["black", "white", "gray"]
         bg_row = Adw.ComboRow(title="Reader Background")
         bg_model = Gtk.StringList.new(["Black", "White", "Gray"])
         bg_row.set_model(bg_model)
+        current_bg = db.get_setting("reader_background", "black")
+        bg_row.set_selected(
+            self._BG_VALUES.index(current_bg) if current_bg in self._BG_VALUES else 0
+        )
+        bg_row.connect("notify::selected", self._on_default_background_changed)
         reader_group.add(bg_row)
 
         # Library group
         lib_group = Adw.PreferencesGroup(title="Library")
         content.append(lib_group)
 
-        from ..core.database import get_db
         self._auto_update_row = Adw.SwitchRow(
             title="Auto-update library",
             subtitle="Check for new chapters on startup",
@@ -360,7 +383,8 @@ class MainWindow(Adw.ApplicationWindow):
         lib_group.add(self._auto_update_row)
 
         unread_row = Adw.SwitchRow(title="Show unread badge", subtitle="Show unread chapter count on covers")
-        unread_row.set_active(True)
+        unread_row.set_active(get_db().get_setting("show_unread_badge", "1") == "1")
+        unread_row.connect("notify::active", self._on_show_unread_badge_toggled)
         lib_group.add(unread_row)
 
         # Data group: backup / restore
@@ -522,6 +546,20 @@ class MainWindow(Adw.ApplicationWindow):
 
         value = "1" if row.get_active() else "0"
         get_db().set_setting("auto_update_library", value)
+
+    def _on_show_unread_badge_toggled(self, row, _pspec):
+        value = "1" if row.get_active() else "0"
+        get_db().set_setting("show_unread_badge", value)
+        self._library_view.reload()
+
+    def _on_default_direction_changed(self, row, _pspec):
+        get_db().set_setting("reading_direction", self._DIRECTION_VALUES[row.get_selected()])
+
+    def _on_default_layout_changed(self, row, _pspec):
+        get_db().set_setting("page_layout", self._LAYOUT_VALUES[row.get_selected()])
+
+    def _on_default_background_changed(self, row, _pspec):
+        get_db().set_setting("reader_background", self._BG_VALUES[row.get_selected()])
 
     def _refresh_downloads(self):
         from ..core.downloader import get_download_manager

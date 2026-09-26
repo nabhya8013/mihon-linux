@@ -319,6 +319,7 @@ class Database:
             "scale_type": "fit_page",
             "crop_borders": "0",
             "auto_update_library": "1",
+            "show_unread_badge": "1",
             "reader_tap_invert": "0",
             "reader_fullscreen": "0",
             "reader_keep_screen_on": "0",
