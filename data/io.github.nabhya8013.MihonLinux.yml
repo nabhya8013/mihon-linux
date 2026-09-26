@@ -64,6 +64,14 @@ modules:
         ${FLATPAK_DEST}/share/icons/hicolor/scalable/apps/io.github.nabhya8013.MihonLinux.svg
       - install -Dm644 data/icons/hicolor/symbolic/apps/io.github.nabhya8013.MihonLinux-symbolic.svg
         ${FLATPAK_DEST}/share/icons/hicolor/symbolic/apps/io.github.nabhya8013.MihonLinux-symbolic.svg
+      - install -Dm644 data/icons/hicolor/48x48/apps/io.github.nabhya8013.MihonLinux.png
+        ${FLATPAK_DEST}/share/icons/hicolor/48x48/apps/io.github.nabhya8013.MihonLinux.png
+      - install -Dm644 data/icons/hicolor/64x64/apps/io.github.nabhya8013.MihonLinux.png
+        ${FLATPAK_DEST}/share/icons/hicolor/64x64/apps/io.github.nabhya8013.MihonLinux.png
+      - install -Dm644 data/icons/hicolor/128x128/apps/io.github.nabhya8013.MihonLinux.png
+        ${FLATPAK_DEST}/share/icons/hicolor/128x128/apps/io.github.nabhya8013.MihonLinux.png
+      - install -Dm644 data/icons/hicolor/256x256/apps/io.github.nabhya8013.MihonLinux.png
+        ${FLATPAK_DEST}/share/icons/hicolor/256x256/apps/io.github.nabhya8013.MihonLinux.png
     sources:
       - type: dir
         path: ..
