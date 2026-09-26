@@ -5,11 +5,11 @@ Uses Adw.NavigationSplitView for responsive layout.
 import gi
 gi.require_version("Gtk", "4.0")
 gi.require_version("Adw", "1")
-from gi.repository import Gtk, Adw, GLib, GObject, Gio
+from gi.repository import Gtk, Adw, GLib, GObject, Gio, Pango
 import threading
 import webbrowser
 from pathlib import Path
-from ..core.models import Manga, Chapter
+from ..core.models import Manga, Chapter, DownloadStatus
 from ..core.http_client import set_challenge_solver
 from .library import LibraryView
 from .browse import BrowseView, SourceCatalogView
@@ -138,6 +138,24 @@ class MainWindow(Adw.ApplicationWindow):
             self._refresh_history()
         elif current == "more":
             self._refresh_downloads()
+            self._start_downloads_refresh_timer()
+            return
+        self._stop_downloads_refresh_timer()
+
+    def _start_downloads_refresh_timer(self):
+        if getattr(self, "_downloads_refresh_source", None) is not None:
+            return
+        self._downloads_refresh_source = GLib.timeout_add(2000, self._on_downloads_refresh_tick)
+
+    def _stop_downloads_refresh_timer(self):
+        source = getattr(self, "_downloads_refresh_source", None)
+        if source is not None:
+            GLib.source_remove(source)
+            self._downloads_refresh_source = None
+
+    def _on_downloads_refresh_tick(self) -> bool:
+        self._refresh_downloads()
+        return True
 
     def _run_startup_tasks(self):
         from ..core.database import get_db
@@ -591,20 +609,73 @@ class MainWindow(Adw.ApplicationWindow):
             box.set_margin_top(8)
             box.set_margin_bottom(8)
 
+            header = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
             title = Gtk.Label(
                 label=f"{item.manga.title} – Ch.{item.chapter.chapter_number:g}"
             )
             title.set_xalign(0)
-            box.append(title)
+            title.set_hexpand(True)
+            title.set_ellipsize(Pango.EllipsizeMode.END)
+            header.append(title)
 
-            progress = Gtk.ProgressBar()
-            progress.set_fraction(item.progress)
-            progress.set_text(f"{item.pages_downloaded}/{item.total_pages} pages")
-            progress.set_show_text(True)
-            box.append(progress)
+            chapter_id = item.chapter.id
+            if item.status in (DownloadStatus.QUEUED, DownloadStatus.DOWNLOADING):
+                cancel_btn = Gtk.Button(label="Cancel")
+                cancel_btn.add_css_class("flat")
+                cancel_btn.connect("clicked", self._on_cancel_download, chapter_id)
+                header.append(cancel_btn)
+            elif item.status == DownloadStatus.ERROR:
+                retry_btn = Gtk.Button(label="Retry")
+                retry_btn.add_css_class("flat")
+                retry_btn.connect("clicked", self._on_retry_download, chapter_id)
+                header.append(retry_btn)
+                remove_btn = Gtk.Button(label="Remove")
+                remove_btn.add_css_class("flat")
+                remove_btn.connect("clicked", self._on_remove_download, chapter_id)
+                header.append(remove_btn)
+            elif item.status == DownloadStatus.DOWNLOADED:
+                remove_btn = Gtk.Button(label="Remove")
+                remove_btn.add_css_class("flat")
+                remove_btn.connect("clicked", self._on_remove_download, chapter_id)
+                header.append(remove_btn)
+            box.append(header)
+
+            if item.status == DownloadStatus.ERROR:
+                err = Gtk.Label(label=item.error_message or "Download failed")
+                err.set_xalign(0)
+                err.add_css_class("error")
+                err.add_css_class("caption")
+                box.append(err)
+            elif item.status == DownloadStatus.DOWNLOADED:
+                done = Gtk.Label(label="Downloaded")
+                done.set_xalign(0)
+                done.add_css_class("dim-label")
+                done.add_css_class("caption")
+                box.append(done)
+            else:
+                progress = Gtk.ProgressBar()
+                progress.set_fraction(item.progress)
+                progress.set_text(f"{item.pages_downloaded}/{item.total_pages} pages")
+                progress.set_show_text(True)
+                box.append(progress)
 
             row.set_child(box)
             self._downloads_list.append(row)
+
+    def _on_cancel_download(self, _button, chapter_id: int):
+        from ..core.downloader import get_download_manager
+        get_download_manager().cancel(chapter_id)
+        self._refresh_downloads()
+
+    def _on_retry_download(self, _button, chapter_id: int):
+        from ..core.downloader import get_download_manager
+        get_download_manager().retry(chapter_id)
+        self._refresh_downloads()
+
+    def _on_remove_download(self, _button, chapter_id: int):
+        from ..core.downloader import get_download_manager
+        get_download_manager().remove(chapter_id)
+        self._refresh_downloads()
 
     # ── Local source ──────────────────────────────────────────────────────
 

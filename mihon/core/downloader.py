@@ -92,6 +92,31 @@ class DownloadManager:
                 self._active[chapter_id].status = DownloadStatus.ERROR
                 self._active[chapter_id].error_message = "Cancelled"
 
+    def remove(self, chapter_id: int):
+        """Drop a finished, failed, or cancelled item from the visible queue."""
+        with self._lock:
+            self._active.pop(chapter_id, None)
+
+    def retry(self, chapter_id: int):
+        """Re-fetch pages for a failed/cancelled item and re-enqueue it."""
+        with self._lock:
+            item = self._active.get(chapter_id)
+        if not item:
+            return
+
+        def fetch_and_requeue():
+            try:
+                from ..extensions.registry import get_registry
+                ext = get_registry().get(item.manga.source_id)
+                if not ext:
+                    return
+                pages = ext.get_pages(item.chapter)
+                self.enqueue(item.manga, item.chapter, pages)
+            except Exception as e:
+                logger.error("retry error for chapter %s: %s", chapter_id, e)
+
+        threading.Thread(target=fetch_and_requeue, daemon=True).start()
+
     def get_item(self, chapter_id: int) -> Optional[DownloadItem]:
         with self._lock:
             return self._active.get(chapter_id)
