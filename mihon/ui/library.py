@@ -4,17 +4,17 @@ Library view - shows manga in the user's library with advanced controls.
 import gi
 gi.require_version("Gtk", "4.0")
 gi.require_version("Adw", "1")
-from gi.repository import Gtk, Adw, GLib
+from gi.repository import Gtk, Adw, GLib, Gdk, GObject
 import threading
 from ..core.database import get_db
 from ..core.models import Manga, ReadingStatus
 from .widgets import MangaGridView, EmptyState, LoadingSpinner
-from .library_state import (
-    LibraryPreferences,
-    SORT_OPTIONS,
-    DISPLAY_MODES,
-    apply_library_preferences,
-)
+import logging
+from .library_state import LibraryPreferences, SORT_OPTIONS, DISPLAY_MODES
+from .library_presenter import LibraryPresenter
+from .notify import notify, notify_retry
+
+logger = logging.getLogger("library_view")
 
 
 class LibraryView(Gtk.Box):
@@ -29,17 +29,13 @@ class LibraryView(Gtk.Box):
         self._on_manga_selected = on_manga_selected
         self._on_show_downloads = on_show_downloads
         self._db = get_db()
-        self._all_manga = []
-        self._filtered_manga = []
-        self._downloaded_manga_ids = set()
-        self._categories = []
-        self._category_name_by_id = {}
-        self._search_query = ""
-        self._current_category = None  # None = All
+        # All library data and filter state lives in the presenter; this view
+        # only renders whatever the presenter currently says is visible.
+        self._presenter = LibraryPresenter(self._db)
         self._syncing_controls = False
-        self._prefs = self._load_preferences_for_category(None)
 
         self._build_ui()
+        self._presenter.subscribe(self._on_presenter_changed)
         self._sync_controls_from_prefs()
         self.reload()
 
@@ -286,21 +282,28 @@ class LibraryView(Gtk.Box):
         self._stack.set_visible_child_name("loading")
 
         def load():
-            manga = self._db.get_library(self._current_category)
-            cats = self._db.get_categories()
-            manga_ids = [m.id for m in manga if m.id is not None]
-            downloaded_ids = self._db.get_downloaded_manga_ids(manga_ids)
-            GLib.idle_add(self._on_loaded, manga, cats, downloaded_ids)
+            try:
+                loaded = self._presenter.load_from_db()
+            except Exception as e:
+                GLib.idle_add(self._on_load_failed, str(e))
+                return
+            GLib.idle_add(self._on_loaded, *loaded)
 
         threading.Thread(target=load, daemon=True).start()
 
     def _on_loaded(self, manga, categories, downloaded_ids):
-        self._all_manga = manga
-        self._downloaded_manga_ids = downloaded_ids
-        self._categories = categories
-        self._category_name_by_id = {c.id: c.name for c in categories}
         self._rebuild_category_tabs(categories)
-        self._apply_filters()
+        # set_loaded notifies the presenter's observers, which redraws.
+        self._presenter.set_loaded(manga, categories, downloaded_ids)
+
+    def _on_load_failed(self, message: str):
+        self._empty.set_title("Could not load your library")
+        self._stack.set_visible_child_name("empty")
+        notify_retry(self, f"Could not load your library: {message}", self.reload)
+
+    def _on_presenter_changed(self, _presenter):
+        """The presenter's visible list changed; redraw from it."""
+        self._update_display()
 
     def _rebuild_category_tabs(self, categories):
         child = self._tab_bar.get_first_child()
@@ -310,14 +313,14 @@ class LibraryView(Gtk.Box):
             child = next_c
 
         btn = Gtk.ToggleButton(label="All")
-        btn.set_active(self._current_category is None)
+        btn.set_active(self._presenter.category_id is None)
         btn.connect("toggled", self._on_category_tab, None)
         btn.add_css_class("flat")
         self._tab_bar.append(btn)
 
         for cat in categories:
             b = Gtk.ToggleButton(label=cat.name)
-            b.set_active(self._current_category == cat.id)
+            b.set_active(self._presenter.category_id == cat.id)
             b.connect("toggled", self._on_category_tab, cat.id)
             b.add_css_class("flat")
             self._tab_bar.append(b)
@@ -325,67 +328,59 @@ class LibraryView(Gtk.Box):
     def _on_category_tab(self, btn, category_id):
         if not btn.get_active():
             return
-        old_category = self._current_category
-        self._persist_preferences_for_category(old_category)
-        self._current_category = category_id
-        self._prefs = self._load_preferences_for_category(category_id)
+        if not self._presenter.set_category(category_id):
+            return
         self._sync_controls_from_prefs()
         self.reload()
 
     def _on_search_changed(self, entry):
-        self._search_query = entry.get_text().lower()
-        self._apply_filters()
+        self._presenter.set_search_query(entry.get_text())
 
     def _on_filter_controls_changed(self, *_):
         if self._syncing_controls:
             return
-        self._prefs.status_filters = [
-            status.value
-            for status, cb in self._status_filters.items()
-            if cb.get_active()
-        ]
-        self._prefs.unread_only = self._unread_only_cb.get_active()
-        self._prefs.downloaded_only = self._downloaded_only_cb.get_active()
-        self._persist_current_preferences()
-        self._apply_filters()
+        self._presenter.update_prefs(
+            status_filters=[
+                status.value
+                for status, cb in self._status_filters.items()
+                if cb.get_active()
+            ],
+            unread_only=self._unread_only_cb.get_active(),
+            downloaded_only=self._downloaded_only_cb.get_active(),
+        )
 
     def _on_sort_by_changed(self, btn, sort_key):
         if self._syncing_controls or not btn.get_active():
             return
         changed = self._prefs.sort_by != sort_key
-        self._prefs.sort_by = sort_key
+        # Count- and date-based sorts are most useful highest-first, so flip
+        # the direction when switching onto one of them.
         if changed and sort_key in ("unread_count", "recently_added", "last_read"):
-            self._prefs.sort_desc = True
+            self._presenter.update_prefs(sort_by=sort_key, sort_desc=True)
             self._sync_controls_from_prefs()
-        self._persist_current_preferences()
-        self._apply_filters()
+            return
+        self._presenter.update_prefs(sort_by=sort_key)
 
     def _on_sort_desc_changed(self, btn):
         if self._syncing_controls:
             return
-        self._prefs.sort_desc = btn.get_active()
-        self._persist_current_preferences()
-        self._apply_filters()
+        self._presenter.update_prefs(sort_desc=btn.get_active())
 
     def _on_display_mode_changed(self, btn, mode):
         if self._syncing_controls or not btn.get_active():
             return
-        self._prefs.display_mode = mode
-        self._update_display_icon()
-        self._persist_current_preferences()
-        self._update_display()
+        if self._presenter.update_prefs(display_mode=mode):
+            self._update_display_icon()
 
     def _reset_filters(self, *_):
-        self._prefs.status_filters = []
-        self._prefs.unread_only = False
-        self._prefs.downloaded_only = False
+        self._presenter.update_prefs(
+            status_filters=[], unread_only=False, downloaded_only=False
+        )
         self._sync_controls_from_prefs()
-        self._persist_current_preferences()
-        self._apply_filters()
 
     def _run_batch_mark_read(self, popover):
         popover.popdown()
-        manga_ids = [m.id for m in self._filtered_manga if m.id is not None]
+        manga_ids = self._presenter.visible_ids()
         if not manga_ids:
             self._set_info("Batch mark-read skipped: no filtered manga.")
             return
@@ -399,7 +394,7 @@ class LibraryView(Gtk.Box):
 
     def _run_batch_remove_from_library(self, popover):
         popover.popdown()
-        manga_ids = [m.id for m in self._filtered_manga if m.id is not None]
+        manga_ids = self._presenter.visible_ids()
         if not manga_ids:
             self._set_info("Batch remove skipped: no filtered manga.")
             return
@@ -413,67 +408,64 @@ class LibraryView(Gtk.Box):
 
     def _run_batch_add_to_current_category(self, popover):
         popover.popdown()
-        if self._current_category is None:
+        if self._presenter.category_id is None:
             self._set_info("Pick a category tab first, then run this batch action.")
             return
-        manga_ids = [m.id for m in self._filtered_manga if m.id is not None]
+        manga_ids = self._presenter.visible_ids()
         if not manga_ids:
             self._set_info("Batch category add skipped: no filtered manga.")
             return
-        category_name = self._category_name_by_id.get(self._current_category, "category")
+        category_id = self._presenter.category_id
+        category_name = self._presenter.category_name(category_id) or "category"
         self._set_info(f"Adding filtered manga to '{category_name}'...")
 
         def run():
-            self._db.add_manga_to_category_bulk(manga_ids, self._current_category)
+            self._db.add_manga_to_category_bulk(manga_ids, category_id)
             GLib.idle_add(self._on_batch_done, f"Added filtered manga to '{category_name}'.")
 
         threading.Thread(target=run, daemon=True).start()
 
     def _run_batch_remove_from_current_category(self, popover):
         popover.popdown()
-        if self._current_category is None:
+        if self._presenter.category_id is None:
             self._set_info("Pick a category tab first, then run this batch action.")
             return
-        manga_ids = [m.id for m in self._filtered_manga if m.id is not None]
+        manga_ids = self._presenter.visible_ids()
         if not manga_ids:
             self._set_info("Batch category remove skipped: no filtered manga.")
             return
-        category_name = self._category_name_by_id.get(self._current_category, "category")
+        category_id = self._presenter.category_id
+        category_name = self._presenter.category_name(category_id) or "category"
         self._set_info(f"Removing filtered manga from '{category_name}'...")
 
         def run():
-            removed = self._db.remove_manga_from_category_bulk(manga_ids, self._current_category)
+            removed = self._db.remove_manga_from_category_bulk(manga_ids, category_id)
             GLib.idle_add(self._on_batch_done, f"Removed {removed} manga-category links from '{category_name}'.")
 
         threading.Thread(target=run, daemon=True).start()
 
     def _on_batch_done(self, message: str):
         self._set_info(message)
+        notify(self, message)
         self.reload()
 
-    def _apply_filters(self):
-        self._filtered_manga = apply_library_preferences(
-            manga_list=self._all_manga,
-            prefs=self._prefs,
-            search_query=self._search_query,
-            downloaded_manga_ids=self._downloaded_manga_ids,
-        )
-        self._update_display()
-
     def _update_display(self):
-        if not self._filtered_manga:
-            if self._search_query:
+        visible = self._presenter.visible_manga
+        if not visible:
+            if self._presenter.search_query:
                 self._empty.set_title("No results")
+            elif self._presenter.is_filtered_empty:
+                self._empty.set_title("Nothing matches these filters")
             else:
                 self._empty.set_title("Your library is empty")
             self._stack.set_visible_child_name("empty")
             return
 
         if self._prefs.display_mode == "list":
-            self._render_list(self._filtered_manga)
+            self._render_list(visible)
             self._stack.set_visible_child_name("list")
         else:
-            self._grid.set_manga(self._filtered_manga)
+            self._grid.set_manga(visible)
             self._stack.set_visible_child_name("grid")
 
     def _render_list(self, manga_list):
@@ -523,6 +515,11 @@ class LibraryView(Gtk.Box):
         self._update_display_icon()
 
         self._syncing_controls = False
+
+    @property
+    def _prefs(self):
+        """The presenter owns preferences; this keeps the widget code short."""
+        return self._presenter.prefs
 
     def _update_display_icon(self):
         if self._prefs.display_mode == "list":
@@ -609,11 +606,18 @@ class LibraryView(Gtk.Box):
         categories = self._db.get_categories()
         for idx, cat in enumerate(categories):
             row = Gtk.ListBoxRow()
+            # Remember which category this row is, so a drop can identify both
+            # ends of the move.
+            row.category_id = cat.id
             row_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
             row_box.set_margin_start(8)
             row_box.set_margin_end(8)
             row_box.set_margin_top(6)
             row_box.set_margin_bottom(6)
+
+            handle = Gtk.Image.new_from_icon_name("list-drag-handle-symbolic")
+            handle.set_tooltip_text("Drag to reorder")
+            row_box.append(handle)
 
             name_entry = Gtk.Entry()
             name_entry.set_text(cat.name)
@@ -648,7 +652,55 @@ class LibraryView(Gtk.Box):
             row_box.append(delete_btn)
 
             row.set_child(row_box)
+            self._enable_category_drag(row)
             self._cat_dialog_list.append(row)
+
+    # ── Category drag and drop ────────────────────────────────────────────
+
+    def _enable_category_drag(self, row):
+        """
+        Make one category row draggable onto another to reorder it.
+
+        The up/down buttons stay: drag and drop is the native GTK4 gesture,
+        but it is not discoverable on its own and is awkward with a long list.
+        """
+        source = Gtk.DragSource()
+        source.set_actions(Gdk.DragAction.MOVE)
+        source.connect("prepare", self._on_category_drag_prepare, row)
+        row.add_controller(source)
+
+        target = Gtk.DropTarget.new(GObject.TYPE_INT, Gdk.DragAction.MOVE)
+        target.connect("drop", self._on_category_drop, row)
+        row.add_controller(target)
+
+    @staticmethod
+    def _on_category_drag_prepare(_source, _x, _y, row):
+        # The payload is the dragged row's category id.
+        return Gdk.ContentProvider.new_for_value(row.category_id)
+
+    def _on_category_drop(self, _target, value, _x, _y, target_row):
+        dragged_id = int(value)
+        target_id = target_row.category_id
+        if dragged_id == target_id:
+            return False
+
+        ordered = [c.id for c in self._db.get_categories()]
+        if dragged_id not in ordered or target_id not in ordered:
+            return False
+
+        ordered.remove(dragged_id)
+        ordered.insert(ordered.index(target_id), dragged_id)
+
+        try:
+            self._db.reorder_categories(ordered)
+        except Exception as exc:
+            self._set_cat_dialog_status(f"Could not reorder categories: {exc}")
+            return False
+
+        self._set_cat_dialog_status("Reordered categories.")
+        self.reload()
+        self._refresh_category_manager_list()
+        return True
 
     def _rename_category_from_dialog(self, category_id, entry: Gtk.Entry):
         name = entry.get_text().strip()
@@ -681,9 +733,10 @@ class LibraryView(Gtk.Box):
     def _delete_category_from_dialog(self, category_id, category_name: str):
         try:
             self._db.delete_category(category_id)
-            if self._current_category == category_id:
-                self._current_category = None
-                self._prefs = self._load_preferences_for_category(None)
+            if self._presenter.category_id == category_id:
+                # Fall back to All rather than leave the view on a category
+                # that no longer exists.
+                self._presenter.set_category(None)
                 self._sync_controls_from_prefs()
             self._set_cat_dialog_status(f"Deleted category '{category_name}'.")
             self.reload()
@@ -695,39 +748,9 @@ class LibraryView(Gtk.Box):
         if hasattr(self, "_cat_dialog_status"):
             self._cat_dialog_status.set_text(message)
 
-    def _prefs_key_for_category(self, category_id):
-        if category_id is None:
-            return "library_prefs_global"
-        return f"library_prefs_category_{category_id}"
-
-    def _load_preferences_for_category(self, category_id):
-        key = self._prefs_key_for_category(category_id)
-        raw = self._db.get_setting(key, "")
-        if raw:
-            return LibraryPreferences.from_json(raw)
-        if category_id is not None:
-            fallback = self._db.get_setting("library_prefs_global", "")
-            if fallback:
-                return LibraryPreferences.from_json(fallback)
-        return LibraryPreferences()
-
-    def _persist_preferences_for_category(self, category_id):
-        if category_id is None and self._prefs is None:
-            return
-        self._db.set_setting(self._prefs_key_for_category(category_id), self._prefs.to_json())
-
-    def _persist_current_preferences(self):
-        self._persist_preferences_for_category(self._current_category)
-        if self._current_category is None:
-            self._db.set_setting("library_prefs_global", self._prefs.to_json())
-
     def _set_info(self, text: str):
         self._info_label.set_text(text)
 
     def update_manga(self, manga: Manga):
         """Update a specific manga card (e.g. after adding to library)."""
-        for i, m in enumerate(self._all_manga):
-            if m.id == manga.id:
-                self._all_manga[i] = manga
-                break
-        self._apply_filters()
+        self._presenter.update_manga(manga)
