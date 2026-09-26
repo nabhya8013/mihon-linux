@@ -7,9 +7,11 @@ page ordering and cover discovery are exercised as shipped.
 import io
 import os
 import tempfile
+import types
 import unittest
 import zipfile
 from pathlib import Path
+from unittest.mock import patch
 
 from mihon.core.models import Chapter, Manga, SearchFilter
 from mihon.extensions.local import (
@@ -71,7 +73,8 @@ class HelperTests(unittest.TestCase):
         self.assertFalse(is_image(Path("a.txt")))
         self.assertTrue(is_archive(Path("a.CBZ")))
         self.assertTrue(is_archive(Path("a.zip")))
-        self.assertFalse(is_archive(Path("a.cbr")))
+        self.assertTrue(is_archive(Path("a.cbr")))
+        self.assertTrue(is_archive(Path("a.rar")))
 
 
 class LocalSourceTests(unittest.TestCase):
@@ -292,6 +295,75 @@ class LocalSourceTests(unittest.TestCase):
     def test_details_for_a_missing_series_returns_the_input(self):
         original = Manga(source_id="local", source_manga_id="Ghost", title="Ghost")
         self.assertIs(self.source.get_manga_details(original), original)
+
+
+class CbrSupportTests(unittest.TestCase):
+    """
+    CBR/RAR needs the optional ``rarfile`` package plus an unrar-compatible
+    tool, neither of which a test environment can assume. rarfile.RarFile
+    mirrors zipfile.ZipFile's interface, so a fake standing in for it here
+    still exercises the real extraction code in local.py.
+    """
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self._tmp.name) / "Manga"
+        (self.root / "Berserk").mkdir(parents=True)
+        (self.root / "Berserk" / "Chapter 1.cbr").write_bytes(b"not real rar bytes")
+        self.db = FakeDB()
+        self.source = LocalSource(db=self.db, root=self.root)
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def test_cbr_is_recognized_as_a_chapter(self):
+        manga = Manga(source_id="local", source_manga_id="Berserk", id=1)
+        chapters = self.source.get_chapters(manga)
+        self.assertEqual(len(chapters), 1)
+        self.assertTrue(chapters[0].source_chapter_id.endswith("Chapter 1.cbr"))
+
+    def test_cbr_pages_are_extracted_when_rarfile_is_available(self):
+        entries = {"002.png": PNG, "001.png": PNG, "010.png": PNG}
+
+        class FakeRarFile:
+            def __init__(self, path):
+                pass
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *exc):
+                return False
+
+            def namelist(self):
+                return list(entries)
+
+            def open(self, name):
+                return io.BytesIO(entries[name])
+
+        fake_rarfile = types.SimpleNamespace(RarFile=FakeRarFile, Error=Exception)
+        with patch("mihon.extensions.local.rarfile", fake_rarfile):
+            pages = self.source.get_pages(Chapter(source_chapter_id="Berserk/Chapter 1.cbr"))
+
+        # 001, 002, 010 — not the string order 001, 010, 002.
+        self.assertEqual([p.index for p in pages], [0, 1, 2])
+        for page in pages:
+            self.assertTrue(Path(page.local_path).is_file())
+
+    def test_missing_rarfile_package_yields_no_pages_rather_than_raising(self):
+        with patch("mihon.extensions.local.rarfile", None):
+            pages = self.source.get_pages(Chapter(source_chapter_id="Berserk/Chapter 1.cbr"))
+        self.assertEqual(pages, [])
+
+    def test_a_rarfile_error_yields_no_pages_rather_than_raising(self):
+        class ExplodingRarFile:
+            def __init__(self, path):
+                raise RuntimeError("boom")
+
+        fake_rarfile = types.SimpleNamespace(RarFile=ExplodingRarFile, Error=RuntimeError)
+        with patch("mihon.extensions.local.rarfile", fake_rarfile):
+            pages = self.source.get_pages(Chapter(source_chapter_id="Berserk/Chapter 1.cbr"))
+        self.assertEqual(pages, [])
 
 
 if __name__ == "__main__":

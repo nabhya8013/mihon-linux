@@ -18,8 +18,11 @@ Expected layout, matching upstream:
           002.jpg
 
 CBZ and ZIP are the same container, so both are read with :mod:`zipfile`.
-CBR/RAR is not supported: it needs a non-standard-library unrar
-implementation, and the format is not redistributable.
+CBR/RAR needs the optional ``rarfile`` package plus an unrar-compatible
+tool (``unrar``, ``unar``, or ``bsdtar``) on ``PATH`` — the RAR format
+itself is proprietary and not implementable in the standard library.
+Without both, .cbr/.rar chapters still show up but yield no pages, with
+a log line explaining why.
 """
 from __future__ import annotations
 
@@ -36,6 +39,11 @@ from ..core.database import DATA_DIR
 from ..core.models import Chapter, ExtensionInfo, Manga, Page, SearchFilter
 from .base import Extension
 
+try:
+    import rarfile
+except ImportError:
+    rarfile = None
+
 logger = logging.getLogger("local_source")
 
 SOURCE_ID = "local"
@@ -47,7 +55,8 @@ DEFAULT_LOCAL_DIR = Path.home() / "Manga"
 EXTRACT_DIR = DATA_DIR / "local-pages"
 
 IMAGE_SUFFIXES = (".jpg", ".jpeg", ".png", ".webp", ".gif", ".avif", ".bmp")
-ARCHIVE_SUFFIXES = (".cbz", ".zip")
+RAR_SUFFIXES = (".cbr", ".rar")
+ARCHIVE_SUFFIXES = (".cbz", ".zip") + RAR_SUFFIXES
 COVER_NAMES = ("cover", "folder", "poster", "thumbnail")
 
 # Metadata a user can drop next to a series to override what is inferred.
@@ -250,44 +259,61 @@ class LocalSource(Extension):
 
         The reader loads pages from real files, so the images are written out
         rather than held in memory. Extraction is skipped when the staging
-        folder already holds them.
+        folder already holds them. rarfile.RarFile deliberately mirrors
+        zipfile.ZipFile's namelist()/open() interface, so both containers
+        share one extraction routine.
         """
+        is_rar = archive.suffix.lower() in RAR_SUFFIXES
+        if is_rar and rarfile is None:
+            logger.error(
+                "cannot read %s: the 'rarfile' package is not installed "
+                "(pip install rarfile, plus unrar/unar/bsdtar on PATH)",
+                archive,
+            )
+            return []
+
+        opener = rarfile.RarFile if is_rar else zipfile.ZipFile
+        errors = (rarfile.Error, OSError) if is_rar else (zipfile.BadZipFile, OSError)
         target_dir = EXTRACT_DIR / _stable_name(archive)
 
         try:
-            with zipfile.ZipFile(archive) as bundle:
-                names = sorted(
-                    (
-                        n for n in bundle.namelist()
-                        if not n.endswith("/") and is_image(Path(n))
-                        # Skip macOS resource forks, which are not real pages.
-                        and not Path(n).name.startswith("._")
-                    ),
-                    key=natural_key,
-                )
-                if not names:
-                    logger.warning("no images inside %s", archive)
-                    return []
-
-                target_dir.mkdir(parents=True, exist_ok=True)
-                pages = []
-                for index, name in enumerate(names):
-                    # Flatten to a numbered file: archive paths can contain
-                    # directories, and one of them escaping the staging folder
-                    # would be a path-traversal write.
-                    suffix = Path(name).suffix.lower()
-                    out = target_dir / f"{index:04d}{suffix}"
-                    if not out.exists() or out.stat().st_size == 0:
-                        with bundle.open(name) as src, out.open("wb") as dst:
-                            dst.write(src.read())
-                    pages.append(Page(
-                        index=index, url=str(out), image_url=str(out),
-                        local_path=str(out),
-                    ))
-                return pages
-        except (zipfile.BadZipFile, OSError) as exc:
+            with opener(archive) as bundle:
+                return self._pages_from_bundle(bundle, target_dir, archive)
+        except errors as exc:
             logger.error("could not read %s: %s", archive, exc)
             return []
+
+    @staticmethod
+    def _pages_from_bundle(bundle, target_dir: Path, archive: Path) -> List[Page]:
+        names = sorted(
+            (
+                n for n in bundle.namelist()
+                if not n.endswith("/") and is_image(Path(n))
+                # Skip macOS resource forks, which are not real pages.
+                and not Path(n).name.startswith("._")
+            ),
+            key=natural_key,
+        )
+        if not names:
+            logger.warning("no images inside %s", archive)
+            return []
+
+        target_dir.mkdir(parents=True, exist_ok=True)
+        pages = []
+        for index, name in enumerate(names):
+            # Flatten to a numbered file: archive paths can contain
+            # directories, and one of them escaping the staging folder
+            # would be a path-traversal write.
+            suffix = Path(name).suffix.lower()
+            out = target_dir / f"{index:04d}{suffix}"
+            if not out.exists() or out.stat().st_size == 0:
+                with bundle.open(name) as src, out.open("wb") as dst:
+                    dst.write(src.read())
+            pages.append(Page(
+                index=index, url=str(out), image_url=str(out),
+                local_path=str(out),
+            ))
+        return pages
 
     # ── Internals ─────────────────────────────────────────────────────────
 

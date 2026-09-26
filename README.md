@@ -23,7 +23,7 @@ _Not yet added._
   - MangaDex
   - AllManga (allmanga.to / allanime.day)
   - MangaFire
-  - **Local** — your own CBZ/ZIP archives and image folders
+  - **Local** — your own CBZ/ZIP/CBR/RAR archives and image folders
 - **Updates** tab: scans the library, fetches latest chapters per source, stores new
   chapters, recalculates unread counts, and shows per-manga results
 - **History** tab: recently read chapters
@@ -195,9 +195,13 @@ Point *More → Local source* at a folder laid out one directory per series:
       002.jpg
 ```
 
-CBZ and ZIP are the same container and both work. CBR/RAR does not: it needs a
-non-standard-library unrar implementation. `details.json` accepts `title`, `author`,
-`artist`, `description`, `status` and `genre`.
+CBZ and ZIP are the same container and both work. CBR/RAR also works, given the
+optional `rarfile` package (in `requirements.txt`) plus an unrar-compatible tool
+on `PATH` — `unrar`, `unar`, or `bsdtar`, since the RAR format itself is
+proprietary and not implementable in Python alone. Without either, `.cbr`/`.rar`
+chapters still appear but yield no pages; check the log for which one is
+missing. `details.json` accepts `title`, `author`, `artist`, `description`,
+`status` and `genre`.
 
 Chapter numbers are parsed from filenames. When a name has no number, the source's
 own file ordering is used instead — switch the chapter list to **Source order** from
@@ -262,7 +266,7 @@ build of the bridge JAR. Tagging `v*` builds a release with a generated changelo
 | Tracking says "Client ID needed" | Register an API client and paste its ID in *More → Tracking* (see *Tracking Setup*). |
 | Tracker updates stuck in "waiting" | Check you are still logged in, then press **Retry now** in *More → Tracking*. |
 | Local series not showing up | Check the folder in *More → Local source*, then press **Rescan**. Each series needs its own subfolder. |
-| A `.cbr` file is ignored | RAR is not supported. Repack it as `.cbz`. |
+| A `.cbr`/`.rar` chapter has no pages | Install the `rarfile` package and an unrar-compatible tool (`unrar`, `unar`, or `bsdtar`), then check the log for which one is still missing. |
 
 ## Notes
 

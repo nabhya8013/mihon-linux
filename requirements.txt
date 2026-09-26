@@ -2,3 +2,7 @@ requests>=2.31.0
 curl_cffi>=0.7.0
 PyGObject>=3.42.0
 androguard>=4.1.2
+# Optional: enables .cbr/.rar in the local source. Still needs an
+# unrar-compatible tool on PATH (unrar, unar, or bsdtar) - the RAR format
+# itself is proprietary and rarfile is only a wrapper around one of those.
+rarfile>=4.0
