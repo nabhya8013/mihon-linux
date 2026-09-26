@@ -23,35 +23,60 @@ _Not yet added._
   - MangaDex
   - AllManga (allmanga.to / allanime.day)
   - MangaFire
+  - **Local** — your own CBZ/ZIP archives and image folders
 - **Updates** tab: scans the library, fetches latest chapters per source, stores new
   chapters, recalculates unread counts, and shows per-manga results
 - **History** tab: recently read chapters
-- **Reader**: paged (single/double page, RTL/LTR) and webtoon/continuous modes, with
-  chapter progress and download support
+- **Reader**: paged (single/double/auto page, RTL/LTR) and webtoon/continuous modes,
+  with chapter progress and download support. Pages are prefetched in a sliding
+  window so a page turn is instant, landscape scans are detected and shown as
+  full two-page spreads, and webtoon strips stitch together with no seam
 - **APK extension bridge**: loads Tachiyomi/Mihon `.apk` extensions through a Kotlin
   JVM process (see [`bridge/README.md`](bridge/README.md))
-- **`.tachibk` import**: restore an Android Mihon backup (library, categories, chapter
-  metadata) from *More → Data*
+- **Source filters**: sources that expose a Tachiyomi `FilterList` (genre groups,
+  status selects, tri-state tags, sort order, free-text fields) get a native GTK
+  filter sheet in the source catalog, and the edited state is sent back to the
+  source on search
+- **`.tachibk` import/export**: restore an Android Mihon backup (library, categories,
+  chapter metadata) and write one back out from *More → Data*. Source IDs use
+  upstream's hash, so backups move in both directions
 - **Anti-bot layer**: browser-grade TLS via `curl_cffi`, a WebKit challenge-solver
   window for Cloudflare/DDoS-Guard, and a persistent cookie jar shared between the
   Python app and the JVM bridge
-- Cross-source **migration search**
+- **Keyboard shortcuts**: `Ctrl+K` or `/` global search, `Ctrl+R` / `F5` refresh,
+  `Ctrl+1`–`Ctrl+5` tabs, `Ctrl+?` for the full list
+- **Drag and drop**: drop an APK onto the Extensions tab to install it, drag category
+  rows to reorder them
+- **Tracking**: two-way sync with AniList and MyAnimeList. Reading past 85% of a
+  chapter updates the remote entry, failed updates are queued and retried, and
+  status/progress/score can be edited from the manga page. Tokens live in the system
+  keyring
+- **Global search** (`Ctrl+K`): queries every installed source in parallel and fills
+  in a section per source as each one answers, with a per-source timeout so one slow
+  source cannot hold up the rest. Doubles as the cross-source migration search
 
 ## Project Structure
 
 ```text
 mihon/
 ├── core/         # database, models, HTTP client, downloader, updater, cookie store,
-│                 # challenge bridge, .tachibk importer
+│                 # challenge bridge, .tachibk importer/exporter, source ids,
+│                 # page cache, disk cache, global search
+│   └── tracking/ # AniList + MyAnimeList, credential store, retry queue
 ├── extensions/   # built-in sources + APK extractor + JVM extension bridge
 └── ui/           # GTK views (library, browse, updates, history, reader, more,
-                  # manga detail, challenge solver)
+                  # manga detail, challenge solver, source filters), plus the
+                  # library presenter and toast notifications
+
+data/             # .desktop entry, AppStream metainfo, app icons, Flatpak manifest
+.github/          # CI and release workflows
 
 bridge/           # standalone Kotlin JSON-RPC bridge for APK/JVM extensions
 ```
 
 Application data lives under `~/.local/share/mihon-linux/` (SQLite DB, covers,
-downloads, `cookies.json`).
+`page-cache/`, downloads, `logs/`, `cookies.json`). Covers are kept; cached chapter
+pages are pruned once they pass 512 MB, and can be cleared from *More → Data*.
 
 ## Requirements
 
@@ -153,6 +178,76 @@ Other manual source probes live in the repo root as `test_mangadex.py`,
 `test_allmanga.py`, and `test_chapters.py` (run with `python3 test_mangadex.py`).
 The automated pytest suite is under `tests/` (`python -m pytest tests/`).
 
+## Local Source
+
+Point *More → Local source* at a folder laid out one directory per series:
+
+```text
+~/Manga/
+  Berserk/
+    cover.jpg           # optional; the first page is used otherwise
+    details.json        # optional metadata override
+    Chapter 1.cbz
+    Chapter 2.cbz
+  Akira/
+    Volume 01/          # a folder of loose images works too
+      001.jpg
+      002.jpg
+```
+
+CBZ and ZIP are the same container and both work. CBR/RAR does not: it needs a
+non-standard-library unrar implementation. `details.json` accepts `title`, `author`,
+`artist`, `description`, `status` and `genre`.
+
+Chapter numbers are parsed from filenames. When a name has no number, the source's
+own file ordering is used instead — switch the chapter list to **Source order** from
+the sort menu on the manga page.
+
+## Tracking Setup
+
+AniList and MyAnimeList both require an API client. A desktop app cannot ship a
+shared secret — anything in the source is public — so you register your own, which
+takes about a minute:
+
+| Service | Where | What to enter |
+|---|---|---|
+| AniList | <https://anilist.co/settings/developer> | Redirect URL `https://anilist.co/api/v2/oauth/pin` |
+| MyAnimeList | <https://myanimelist.net/apiconfig> | App type "other", redirect URL anything you like |
+
+Paste the client ID into *More → Tracking*, press **Log in**, approve in the browser,
+then paste back the code it shows you. Neither flow needs a client secret: AniList
+uses the implicit grant and MyAnimeList uses PKCE.
+
+Tokens are stored in your login keyring through libsecret. If no keyring is
+available, the app falls back to its own database and says so in Settings — the
+tokens are not encrypted in that case.
+
+## Desktop Integration
+
+Install the launcher entry, icon, and AppStream metadata so the app appears in your
+application menu and software centre:
+
+```bash
+scripts/install-desktop-files.sh              # per-user, into ~/.local
+scripts/install-desktop-files.sh /usr         # system-wide (needs root)
+scripts/install-desktop-files.sh --uninstall  # remove
+```
+
+This drops a `mihon-linux` launcher on `PATH` pointing back at this checkout, so make
+sure `~/.local/bin` is on your `PATH`.
+
+## Packaging
+
+`data/io.github.nabhya8013.MihonLinux.yml` is a Flatpak manifest. It is **not
+buildable as committed**: a Flatpak build has no network access, so the Python
+dependencies must first be turned into hash-pinned sources with
+`flatpak-pip-generator`. The manifest header has the exact command. It is left
+incomplete rather than stubbed, so a build fails loudly instead of appearing to work.
+
+CI runs on every push: tests under `xvfb`, an import check of every module, `ruff`
+error-level lint, `desktop-file-validate`, `appstreamcli validate`, and a Gradle
+build of the bridge JAR. Tagging `v*` builds a release with a generated changelog.
+
 ## Troubleshooting
 
 | Symptom | Fix |
@@ -162,13 +257,25 @@ The automated pytest suite is under `tests/` (`python -m pytest tests/`).
 | Challenge-solver window never appears on a Cloudflare block | Install WebKitGTK 6.0 (`webkitgtk6.0` / `gir1.2-webkit-6.0`). |
 | `Failed to initialize GTK window` / app exits immediately | Run inside a graphical session — `DISPLAY` or `WAYLAND_DISPLAY` must be set. |
 | `./gradlew jar` fails with a JRE / "no compiler" error | Install a full JDK 21, not just the JRE, and point `JAVA_HOME` at it. |
+| App does not appear in the application menu | Run `scripts/install-desktop-files.sh`, then log out and back in. |
+| Disk usage growing under `~/.local/share/mihon-linux` | Clear the page cache from *More → Data*. Downloads and covers are kept. |
+| Tracking says "Client ID needed" | Register an API client and paste its ID in *More → Tracking* (see *Tracking Setup*). |
+| Tracker updates stuck in "waiting" | Check you are still logged in, then press **Retry now** in *More → Tracking*. |
+| Local series not showing up | Check the folder in *More → Local source*, then press **Rescan**. Each series needs its own subfolder. |
+| A `.cbr` file is ignored | RAR is not supported. Repack it as `.cbz`. |
 
 ## Notes
 
 - Network connectivity is required for source fetch/update operations.
+- Logs are written to `~/.local/share/mihon-linux/logs/mihon.log`. Raise the level
+  with `MIHON_LOG_LEVEL=DEBUG`.
 - JVM extensions require the bridge JAR and Java 21.
 
 ## License
 
-This project is inspired by and aims for behavioral parity with Mihon/Tachiyomi
-(Apache 2.0). A `LICENSE` file for this repository is pending.
+Released under the [MIT License](LICENSE).
+
+This project is an independent reimplementation of, and aims for behavioral parity
+with, [Mihon](https://github.com/mihonapp/mihon) (Apache 2.0). See [`NOTICE`](NOTICE)
+for what is derived from upstream and how it is attributed. This project is not
+affiliated with or endorsed by the Mihon or Tachiyomi projects.

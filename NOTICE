@@ -1,0 +1,54 @@
+mihon-linux
+Copyright (c) 2026 nabhya8013
+
+This product is an independent, unaffiliated GTK4/Python reimplementation for
+Linux desktop of the Mihon manga reader for Android.
+
+--------------------------------------------------------------------------------
+Upstream attribution
+--------------------------------------------------------------------------------
+
+Mihon (https://github.com/mihonapp/mihon), and Tachiyomi
+(https://github.com/tachiyomiorg/tachiyomi) before it, are licensed under the
+Apache License, Version 2.0. A copy of that license is available at:
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+The following parts of this project are derived from, or designed for
+compatibility with, that upstream work:
+
+  * The extension source API contract reproduced in `bridge/src/main/kotlin/`
+    (`Source`, `CatalogueSource`, `HttpSource`, `SManga`, `SChapter`, `Page`,
+    `Filter`, `FilterList`, `MangasPage`) so that unmodified Tachiyomi and
+    Mihon extension APKs can be loaded and executed.
+
+  * The Android platform stubs under `bridge/src/main/kotlin/android/`, which
+    exist only to satisfy the Android APIs those extensions link against.
+
+  * The `.tachibk` backup schema implemented in
+    `mihon/core/tachibk_importer.py` and `mihon/core/tachibk_exporter.py`,
+    which mirrors Mihon's protobuf field numbering so that backups can be
+    moved between Android Mihon and this application in both directions.
+
+  * The source id derivation in `mihon/core/tachibk_exporter.py`, which
+    reproduces Tachiyomi's `HttpSource.id` hash so that exported backups
+    resolve to the correct extension on Android.
+
+  * The Cloudflare interceptor and rate-limit interceptor behavior in
+    `bridge/src/main/kotlin/eu/kanade/tachiyomi/network/`.
+
+This project is not endorsed by, affiliated with, or supported by the Mihon or
+Tachiyomi projects or their contributors.
+
+--------------------------------------------------------------------------------
+Third-party dependencies
+--------------------------------------------------------------------------------
+
+This project depends on, but does not bundle, software distributed under its
+own license, including GTK4 and libadwaita (LGPL-2.1-or-later), PyGObject
+(LGPL-2.1-or-later), curl_cffi (MIT), protobuf (BSD-3-Clause), OkHttp
+(Apache-2.0), jsoup (MIT), and Kotlin (Apache-2.0). Each remains under the
+terms of its own license.
+
+Manga content accessed through this application belongs to its respective
+rights holders. This project neither hosts nor distributes any such content.
