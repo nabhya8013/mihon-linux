@@ -43,7 +43,7 @@ class DownloadManager:
     Emits callbacks on progress and status changes.
     """
 
-    MAX_WORKERS = 2
+    DEFAULT_MAX_WORKERS = 2
 
     def __init__(self):
         self._queue: queue.Queue = queue.Queue()
@@ -54,6 +54,12 @@ class DownloadManager:
         self._on_progress_cb: Optional[Callable] = None
         self._on_status_cb: Optional[Callable] = None
         self._session = create_http_session()
+        try:
+            self.MAX_WORKERS = int(get_db().get_setting(
+                "max_simultaneous_downloads", str(self.DEFAULT_MAX_WORKERS)
+            ))
+        except ValueError:
+            self.MAX_WORKERS = self.DEFAULT_MAX_WORKERS
         self._start_workers()
 
     def _start_workers(self):
@@ -147,10 +153,11 @@ class DownloadManager:
         if self._on_status_cb:
             self._on_status_cb(chapter.id, DownloadStatus.DOWNLOADING)
 
-        # Build local directory: downloads/source/manga_title/Ch.XXX/
+        # Build local directory: <download_dir>/source/manga_title/Ch.XXX/
+        downloads_root = Path(get_db().get_setting("download_dir", str(DOWNLOADS_DIR)))
         safe_title = self._safe_name(manga.title)
         ch_num = f"Ch.{chapter.chapter_number:g}"
-        chapter_dir = DOWNLOADS_DIR / item.manga.source_id / safe_title / ch_num
+        chapter_dir = downloads_root / item.manga.source_id / safe_title / ch_num
         chapter_dir.mkdir(parents=True, exist_ok=True)
 
         downloaded = 0

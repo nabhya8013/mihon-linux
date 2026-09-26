@@ -17,7 +17,7 @@ from .updates import UpdatesView
 from .manga_detail import MangaDetailView
 from .reader import ReaderView
 from .challenge_solver import WebKitCookieSolver
-from ..core.database import get_db
+from ..core.database import get_db, DOWNLOADS_DIR
 from ..core.tracking import get_track_manager
 from ..extensions.repo_manager import get_repo_manager
 from .notify import notify, notify_error
@@ -339,9 +339,26 @@ class MainWindow(Adw.ApplicationWindow):
         self._downloads_list.add_css_class("boxed-list")
         dl_group.add(self._downloads_list)
 
-        dl_path_row = Adw.ActionRow(title="Download Location")
-        dl_path_row.set_subtitle(str(__import__("pathlib").Path.home() / ".local" / "share" / "mihon-linux" / "downloads"))
-        dl_group.add(dl_path_row)
+        self._dl_path_row = Adw.ActionRow(title="Download Location")
+        self._dl_path_row.set_subtitle(get_db().get_setting("download_dir", str(DOWNLOADS_DIR)))
+        self._dl_path_row.set_subtitle_lines(2)
+        dl_choose_btn = Gtk.Button(label="Choose…")
+        dl_choose_btn.set_valign(Gtk.Align.CENTER)
+        dl_choose_btn.connect("clicked", self._on_choose_download_dir)
+        self._dl_path_row.add_suffix(dl_choose_btn)
+        self._dl_path_row.set_activatable_widget(dl_choose_btn)
+        dl_group.add(self._dl_path_row)
+
+        max_dl_row = Adw.SpinRow.new_with_range(1, 10, 1)
+        max_dl_row.set_title("Max simultaneous downloads")
+        max_dl_row.set_subtitle("Applies the next time the app starts")
+        try:
+            current_max = int(get_db().get_setting("max_simultaneous_downloads", "3"))
+        except ValueError:
+            current_max = 3
+        max_dl_row.set_value(current_max)
+        max_dl_row.connect("notify::value", self._on_max_downloads_changed)
+        dl_group.add(max_dl_row)
 
         # Reader settings group
         reader_group = Adw.PreferencesGroup(
@@ -602,6 +619,34 @@ class MainWindow(Adw.ApplicationWindow):
         value = "1" if row.get_active() else "0"
         get_db().set_setting("show_unread_badge", value)
         self._library_view.reload()
+
+    def _on_choose_download_dir(self, button):
+        dialog = Gtk.FileDialog()
+        dialog.set_title("Choose the download folder")
+        current = get_db().get_setting("download_dir", str(DOWNLOADS_DIR))
+        try:
+            dialog.set_initial_folder(Gio.File.new_for_path(current))
+        except Exception:
+            pass
+        dialog.select_folder(self, None, self._on_download_dir_chosen)
+
+    def _on_download_dir_chosen(self, dialog, result):
+        try:
+            folder = dialog.select_folder_finish(result)
+        except Exception as e:
+            if "Dismissed" not in str(e):
+                notify_error(self, str(e))
+            return
+        if folder is None:
+            return
+
+        path = folder.get_path()
+        get_db().set_setting("download_dir", path)
+        self._dl_path_row.set_subtitle(path)
+        notify(self, f"Downloads will be saved to {path}.")
+
+    def _on_max_downloads_changed(self, row, _pspec):
+        get_db().set_setting("max_simultaneous_downloads", str(int(row.get_value())))
 
     def _on_default_direction_changed(self, row, _pspec):
         get_db().set_setting("reading_direction", self._DIRECTION_VALUES[row.get_selected()])
