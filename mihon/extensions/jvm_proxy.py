@@ -117,6 +117,9 @@ class JvmProxyExtension(Extension):
             updated.title = updated.title or manga.title
             updated.cover_url = updated.cover_url or manga.cover_url
             updated.source_memo = updated.source_memo or manga.source_memo
+            # The details call filled in everything the source knows, so this
+            # manga no longer needs re-fetching from a browse listing.
+            updated.initialized = True
             return updated
         except BridgeError as e:
             logger.error(f"[{self._name}] get_manga_details failed: {e}")
@@ -129,15 +132,20 @@ class JvmProxyExtension(Extension):
                 "manga": self._to_bridge_manga(manga),
             }, timeout=60.0)
             chapters = []
-            for ch_data in result:
+            for order, ch_data in enumerate(result):
                 ch = Chapter()
                 ch.manga_id = manga.id or 0
                 ch.source_chapter_id = ch_data.get("url", "")
                 ch.title = ch_data.get("name", "")
                 ch.chapter_number = ch_data.get("chapterNumber", -1.0)
                 ch.scanlator = ch_data.get("scanlator", "")
+                # Android stores dateUpload in milliseconds; the local schema
+                # uses epoch seconds.
                 ch.uploaded_at = ch_data.get("dateUpload", 0) / 1000.0 if ch_data.get("dateUpload") else None
                 ch.url = ch_data.get("url", "")
+                # Extensions return chapters newest-first. Sources with no
+                # usable chapter numbering depend on this ordering.
+                ch.source_order = ch_data.get("sourceOrder", order)
                 chapters.append(ch)
             return chapters
         except BridgeError as e:

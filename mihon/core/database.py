@@ -4,8 +4,10 @@ Handles manga library, chapters, history, downloads, categories.
 """
 import sqlite3
 import json
+import threading
 import time
 import os
+from contextlib import contextmanager
 from typing import Optional, List, Tuple
 from pathlib import Path
 from .models import (
@@ -25,14 +27,189 @@ def ensure_dirs():
     DOWNLOADS_DIR.mkdir(parents=True, exist_ok=True)
 
 
+class _Result:
+    """
+    The rows a statement produced, read while the write lock is still held.
+
+    Returning the live cursor instead would leave the actual read happening
+    after the lock is released, so another thread committing in between
+    raises "bad parameter or other API misuse". Every row is materialised up
+    front, which is safe here because no query in this module streams a large
+    result set.
+    """
+
+    def __init__(self, cursor):
+        try:
+            self._rows = cursor.fetchall()
+        except sqlite3.ProgrammingError:
+            # Statements such as INSERT return no rows to fetch.
+            self._rows = []
+        self.lastrowid = cursor.lastrowid
+        self.rowcount = cursor.rowcount
+        self._position = 0
+
+    def fetchone(self):
+        if self._position >= len(self._rows):
+            return None
+        row = self._rows[self._position]
+        self._position += 1
+        return row
+
+    def fetchall(self):
+        rows = self._rows[self._position:]
+        self._position = len(self._rows)
+        return rows
+
+    def fetchmany(self, size=1):
+        rows = self._rows[self._position:self._position + size]
+        self._position += len(rows)
+        return rows
+
+    def __iter__(self):
+        return iter(self.fetchall())
+
+    def __len__(self):
+        return len(self._rows)
+
+
+class _LockedConnection:
+    """
+    A sqlite3 connection guarded by one reentrant lock.
+
+    The connection is opened with ``check_same_thread=False`` because the UI
+    runs database work on worker threads. That alone is not enough: two
+    threads writing at once can raise "database is locked" or interleave a
+    statement with another thread's commit. Serialising every call through a
+    single lock removes that, and the lock is reentrant so a method holding
+    it can still call another one.
+
+    WAL mode keeps concurrent *readers* fast, so this costs little.
+    """
+
+    def __init__(self, conn: sqlite3.Connection, lock: threading.RLock):
+        self._conn = conn
+        self._lock = lock
+
+    def execute(self, *args, **kwargs):
+        with self._lock:
+            return _Result(self._conn.execute(*args, **kwargs))
+
+    def executemany(self, *args, **kwargs):
+        with self._lock:
+            return _Result(self._conn.executemany(*args, **kwargs))
+
+    def executescript(self, *args, **kwargs):
+        with self._lock:
+            return _Result(self._conn.executescript(*args, **kwargs))
+
+    def commit(self):
+        with self._lock:
+            return self._conn.commit()
+
+    def rollback(self):
+        with self._lock:
+            return self._conn.rollback()
+
+    def cursor(self, *args, **kwargs):
+        with self._lock:
+            return self._conn.cursor(*args, **kwargs)
+
+    def close(self):
+        with self._lock:
+            return self._conn.close()
+
+    def __getattr__(self, name):
+        # Attributes such as row_factory pass straight through.
+        return getattr(self._conn, name)
+
+
 class Database:
     def __init__(self):
         ensure_dirs()
-        self.conn = sqlite3.connect(str(DB_PATH), check_same_thread=False)
-        self.conn.row_factory = sqlite3.Row
+        raw = sqlite3.connect(str(DB_PATH), check_same_thread=False)
+        raw.row_factory = sqlite3.Row
+        self._write_lock = threading.RLock()
+        self.conn = _LockedConnection(raw, self._write_lock)
         self.conn.execute("PRAGMA journal_mode=WAL")
         self.conn.execute("PRAGMA foreign_keys=ON")
+        # Wait rather than fail if another process holds the write lock.
+        self.conn.execute("PRAGMA busy_timeout=5000")
         self._create_tables()
+        self._migrate_schema()
+
+    @contextmanager
+    def transaction(self):
+        """
+        Hold the write lock across several statements.
+
+        Individual calls are already serialised, but a multi-statement write
+        such as upserting a chapter list must not be interleaved with another
+        thread's write and commit.
+        """
+        with self._write_lock:
+            try:
+                yield self.conn
+            except Exception:
+                self.conn.rollback()
+                raise
+
+    def _migrate_schema(self):
+        """
+        Add columns and tables introduced after the first release.
+
+        `CREATE TABLE IF NOT EXISTS` never touches an existing table, so new
+        columns need an explicit ALTER guarded by what the table already has.
+        """
+        c = self.conn
+
+        tracking_columns = {
+            row["name"]
+            for row in c.execute("PRAGMA table_info(manga_tracking)").fetchall()
+        }
+        # Tracker media id and library-entry id: needed to update a remote
+        # entry, and not stored by the original schema.
+        for column, ddl in (
+            ("remote_id", "remote_id TEXT DEFAULT ''"),
+            ("library_id", "library_id TEXT DEFAULT ''"),
+            ("title", "title TEXT DEFAULT ''"),
+            ("total_chapters", "total_chapters REAL DEFAULT 0"),
+            ("started_at", "started_at REAL"),
+            ("finished_at", "finished_at REAL"),
+        ):
+            if column not in tracking_columns:
+                c.execute(f"ALTER TABLE manga_tracking ADD COLUMN {ddl}")
+
+        chapter_columns = {
+            row["name"] for row in c.execute("PRAGMA table_info(chapters)").fetchall()
+        }
+        if "source_order" not in chapter_columns:
+            c.execute("ALTER TABLE chapters ADD COLUMN source_order INTEGER DEFAULT 0")
+
+        manga_columns = {
+            row["name"] for row in c.execute("PRAGMA table_info(manga)").fetchall()
+        }
+        if "initialized" not in manga_columns:
+            c.execute("ALTER TABLE manga ADD COLUMN initialized INTEGER DEFAULT 0")
+
+        c.executescript("""
+        -- Pending tracker updates that could not be delivered. Drained on the
+        -- next app start and whenever a sync succeeds.
+        CREATE TABLE IF NOT EXISTS tracking_queue (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            manga_id INTEGER NOT NULL,
+            provider TEXT NOT NULL,
+            payload TEXT NOT NULL,
+            attempts INTEGER DEFAULT 0,
+            last_error TEXT DEFAULT '',
+            queued_at REAL NOT NULL,
+            next_attempt_at REAL DEFAULT 0,
+            FOREIGN KEY(manga_id) REFERENCES manga(id) ON DELETE CASCADE
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_tracking_queue_ready
+            ON tracking_queue(next_attempt_at);
+        """)
+        c.commit()
 
     def _create_tables(self):
         c = self.conn
@@ -170,14 +347,26 @@ class Database:
 
     def upsert_manga(self, manga: Manga) -> int:
         """Insert or update manga, return its database ID."""
+        # The write and the id lookup have to be one unit: another thread
+        # could otherwise commit between them.
+        with self.transaction():
+            self._upsert_manga_locked(manga)
+            self.conn.commit()
+            row = self.conn.execute(
+                "SELECT id FROM manga WHERE source_id=? AND source_manga_id=?",
+                (manga.source_id, manga.source_manga_id)
+            ).fetchone()
+            return row["id"]
+
+    def _upsert_manga_locked(self, manga: Manga) -> None:
         now = time.time()
         self.conn.execute("""
             INSERT INTO manga (
                 source_id, source_manga_id, title, alt_titles, author, artist,
                 description, genres, status, cover_url, url, in_library,
                 reading_status, added_at, updated_at, cover_local_path,
-                score, year, content_rating
-            ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                score, year, content_rating, initialized
+            ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
             ON CONFLICT(source_id, source_manga_id) DO UPDATE SET
                 title=excluded.title,
                 alt_titles=excluded.alt_titles,
@@ -191,7 +380,10 @@ class Database:
                 updated_at=excluded.updated_at,
                 score=excluded.score,
                 year=excluded.year,
-                content_rating=excluded.content_rating
+                content_rating=excluded.content_rating,
+                -- Never downgrade a fully fetched manga back to uninitialized:
+                -- a later browse listing carries less than the details call did.
+                initialized=MAX(manga.initialized, excluded.initialized)
         """, (
             manga.source_id, manga.source_manga_id, manga.title,
             json.dumps(manga.alt_titles), manga.author, manga.artist,
@@ -199,14 +391,9 @@ class Database:
             manga.cover_url, manga.url, int(manga.in_library),
             manga.reading_status.value,
             manga.added_at or now, now,
-            manga.cover_local_path, manga.score, manga.year, manga.content_rating
+            manga.cover_local_path, manga.score, manga.year, manga.content_rating,
+            int(manga.initialized),
         ))
-        self.conn.commit()
-        row = self.conn.execute(
-            "SELECT id FROM manga WHERE source_id=? AND source_manga_id=?",
-            (manga.source_id, manga.source_manga_id)
-        ).fetchone()
-        return row["id"]
 
     def get_manga_by_id(self, manga_id: int) -> Optional[Manga]:
         row = self.conn.execute("SELECT * FROM manga WHERE id=?", (manga_id,)).fetchone()
@@ -298,6 +485,7 @@ class Database:
         m.cover_url = row["cover_url"] or ""
         m.url = row["url"] or ""
         m.in_library = bool(row["in_library"])
+        m.initialized = bool(row["initialized"])
         m.reading_status = ReadingStatus(row["reading_status"] or "none")
         m.unread_count = row["unread_count"] or 0
         m.chapter_count = row["chapter_count"] or 0
@@ -314,13 +502,17 @@ class Database:
 
     def upsert_chapters(self, chapters: List[Chapter]) -> None:
         now = time.time()
+        with self.transaction():
+            self._upsert_chapters_locked(chapters, now)
+
+    def _upsert_chapters_locked(self, chapters: List[Chapter], now: float) -> None:
         for ch in chapters:
             self.conn.execute("""
                 INSERT INTO chapters (
                     manga_id, source_chapter_id, title, chapter_number,
                     volume_number, scanlator, uploaded_at, fetched_at,
-                    read, last_page_read, page_count, url
-                ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)
+                    read, last_page_read, page_count, url, source_order
+                ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)
                 ON CONFLICT(manga_id, source_chapter_id) DO UPDATE SET
                     title=excluded.title,
                     chapter_number=excluded.chapter_number,
@@ -328,12 +520,14 @@ class Database:
                     scanlator=excluded.scanlator,
                     uploaded_at=excluded.uploaded_at,
                     fetched_at=excluded.fetched_at,
-                    url=excluded.url
+                    url=excluded.url,
+                    source_order=excluded.source_order
             """, (
                 ch.manga_id, ch.source_chapter_id, ch.title,
                 ch.chapter_number, ch.volume_number, ch.scanlator,
                 ch.uploaded_at, now,
-                int(ch.read), ch.last_page_read, ch.page_count, ch.url
+                int(ch.read), ch.last_page_read, ch.page_count, ch.url,
+                ch.source_order,
             ))
         # Update chapter count on manga
         if chapters:
@@ -346,9 +540,20 @@ class Database:
             )
         self.conn.commit()
 
-    def get_chapters(self, manga_id: int) -> List[Chapter]:
+    # How a manga's chapters are ordered when read back.
+    CHAPTER_SORTS = {
+        # Highest chapter number first. Useless on sources whose chapters have
+        # no numbering, which is why source order exists.
+        "number": "chapter_number DESC, source_order ASC",
+        # The order the source itself listed them, newest first.
+        "source": "source_order ASC, chapter_number DESC",
+        "upload": "uploaded_at DESC, chapter_number DESC",
+    }
+
+    def get_chapters(self, manga_id: int, sort: str = "number") -> List[Chapter]:
+        order = self.CHAPTER_SORTS.get(sort, self.CHAPTER_SORTS["number"])
         rows = self.conn.execute(
-            "SELECT * FROM chapters WHERE manga_id=? ORDER BY chapter_number DESC",
+            f"SELECT * FROM chapters WHERE manga_id=? ORDER BY {order}",
             (manga_id,)
         ).fetchall()
         return [self._row_to_chapter(r) for r in rows]
@@ -457,6 +662,7 @@ class Database:
         ch.read = bool(row["read"])
         ch.last_page_read = row["last_page_read"] or 0
         ch.page_count = row["page_count"] or 0
+        ch.source_order = row["source_order"] or 0
         ch.download_status = DownloadStatus(row["download_status"] or "not_downloaded")
         ch.local_path = row["local_path"]
         ch.url = row["url"] or ""
@@ -552,7 +758,9 @@ class Database:
     def get_manga_tracking(self, manga_id: int) -> List[dict]:
         rows = self.conn.execute(
             """
-            SELECT provider, status, progress, score, url, note, last_synced_at
+            SELECT provider, status, progress, score, url, note, last_synced_at,
+                   remote_id, library_id, title, total_chapters,
+                   started_at, finished_at
             FROM manga_tracking
             WHERE manga_id=?
             ORDER BY provider
@@ -570,21 +778,39 @@ class Database:
         score: float = 0.0,
         url: str = "",
         note: str = "",
+        remote_id: str = "",
+        library_id: str = "",
+        title: str = "",
+        total_chapters: float = 0.0,
+        started_at: Optional[float] = None,
+        finished_at: Optional[float] = None,
     ):
         self.conn.execute(
             """
             INSERT INTO manga_tracking(
-                manga_id, provider, status, progress, score, url, note, last_synced_at
-            ) VALUES(?,?,?,?,?,?,?,?)
+                manga_id, provider, status, progress, score, url, note,
+                last_synced_at, remote_id, library_id, title, total_chapters,
+                started_at, finished_at
+            ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)
             ON CONFLICT(manga_id, provider) DO UPDATE SET
                 status=excluded.status,
                 progress=excluded.progress,
                 score=excluded.score,
                 url=excluded.url,
                 note=excluded.note,
-                last_synced_at=excluded.last_synced_at
+                last_synced_at=excluded.last_synced_at,
+                remote_id=excluded.remote_id,
+                library_id=excluded.library_id,
+                title=excluded.title,
+                total_chapters=excluded.total_chapters,
+                started_at=excluded.started_at,
+                finished_at=excluded.finished_at
             """,
-            (manga_id, provider, status, progress, score, url, note, time.time()),
+            (
+                manga_id, provider, status, progress, score, url, note,
+                time.time(), remote_id, library_id, title, total_chapters,
+                started_at, finished_at,
+            ),
         )
         self.conn.commit()
 
@@ -679,8 +905,14 @@ class Database:
 # Singleton
 _db: Optional[Database] = None
 
+_db_lock = threading.Lock()
+
+
 def get_db() -> Database:
     global _db
-    if _db is None:
-        _db = Database()
-    return _db
+    # Guarded: the UI opens the database from whichever thread gets there
+    # first, and two of them racing would build two connections.
+    with _db_lock:
+        if _db is None:
+            _db = Database()
+        return _db

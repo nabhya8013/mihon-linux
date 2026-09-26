@@ -45,6 +45,10 @@ class Manga:
     cover_url: str = ""
     url: str = ""
     in_library: bool = False
+    # Whether the source has filled in the full details (SManga.initialized).
+    # False means the manga came from a browse/search listing, which carries
+    # only title and cover, so details are still worth fetching.
+    initialized: bool = False
     reading_status: ReadingStatus = ReadingStatus.NONE
     unread_count: int = 0
     chapter_count: int = 0
@@ -72,6 +76,10 @@ class Chapter:
     scanlator: str = ""
     uploaded_at: Optional[float] = None
     fetched_at: Optional[float] = None
+    # Position in the list the source returned, newest first, mirroring
+    # Tachiyomi's SChapter source_order. Sources whose chapters have no usable
+    # numbering rely on this ordering rather than on chapter_number.
+    source_order: int = 0
     read: bool = False
     last_page_read: int = 0
     page_count: int = 0
