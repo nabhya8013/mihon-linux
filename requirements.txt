@@ -1,3 +1,4 @@
 requests>=2.31.0
+curl_cffi>=0.7.0
 PyGObject>=3.42.0
 androguard>=4.1.2

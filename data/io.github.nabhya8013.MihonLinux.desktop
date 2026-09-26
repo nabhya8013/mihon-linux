@@ -1,0 +1,14 @@
+[Desktop Entry]
+Type=Application
+Version=1.0
+Name=Mihon for Linux
+GenericName=Manga Reader
+Comment=Read and manage manga from online sources
+Keywords=manga;comic;manhwa;manhua;webtoon;reader;tachiyomi;mihon;
+Exec=mihon-linux
+TryExec=mihon-linux
+Icon=io.github.nabhya8013.MihonLinux
+Terminal=false
+Categories=Graphics;Viewer;
+StartupNotify=true
+StartupWMClass=io.github.nabhya8013.MihonLinux

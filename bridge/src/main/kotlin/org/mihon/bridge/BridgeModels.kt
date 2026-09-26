@@ -20,6 +20,12 @@ data class BridgeManga(
     val status: Int = 0,
     val thumbnailUrl: String? = null,
     val initialized: Boolean = false,
+    /**
+     * Serialized `SManga.memo`. API-driven sources stash the raw entry JSON here
+     * during search and read it back in getMangaUpdate; dropping it on the wire
+     * made those sources throw NPE when fetching chapters.
+     */
+    val memo: String? = null,
 )
 
 @Serializable
@@ -65,6 +71,7 @@ fun SManga.toBridge() = BridgeManga(
     status = status,
     thumbnailUrl = thumbnail_url,
     initialized = initialized,
+    memo = memo?.toString(),
 )
 
 fun SChapter.toBridge() = BridgeChapter(
@@ -99,6 +106,9 @@ fun BridgeManga.toSManga(): SManga = SManga.create().apply {
     status = this@toSManga.status
     thumbnail_url = this@toSManga.thumbnailUrl
     initialized = this@toSManga.initialized
+    memo = this@toSManga.memo?.let { raw ->
+        runCatching { bridgeJson.parseToJsonElement(raw).jsonObject }.getOrNull()
+    }
 }
 
 fun BridgeChapter.toSChapter(): SChapter = SChapter.create().apply {

@@ -1,0 +1,66 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Tag to release"
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: Publish release
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # The changelog is generated from the commits since the last tag.
+          fetch-depth: 0
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+
+      - name: Build the bridge JAR
+        working-directory: bridge
+        run: ./gradlew --no-daemon jar
+
+      - name: Generate the changelog
+        id: changelog
+        run: |
+          TAG="${GITHUB_REF_NAME:-${{ inputs.tag }}}"
+          PREVIOUS=$(git describe --tags --abbrev=0 "${TAG}^" 2>/dev/null || true)
+
+          {
+            echo "## What changed"
+            echo
+            if [ -n "$PREVIOUS" ]; then
+              git log --pretty='- %s' "$PREVIOUS..$TAG"
+            else
+              git log --pretty='- %s'
+            fi
+          } > CHANGELOG_RELEASE.md
+
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+
+      - name: Package the source archive
+        run: |
+          TAG="${{ steps.changelog.outputs.tag }}"
+          git archive --format=tar.gz --prefix="mihon-linux-${TAG}/" \
+            -o "mihon-linux-${TAG}.tar.gz" "$TAG"
+
+      - name: Create the GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.changelog.outputs.tag }}
+          body_path: CHANGELOG_RELEASE.md
+          files: |
+            mihon-linux-*.tar.gz
+            bridge/build/libs/*.jar

@@ -6,11 +6,35 @@ import os
 import threading
 import queue
 import time
-import requests
+from urllib.parse import urlparse
 from pathlib import Path
 from typing import Dict, List, Optional, Callable
 from .database import get_db, DOWNLOADS_DIR
+from .http_client import create_http_session
 from .models import Manga, Chapter, Page, DownloadStatus, DownloadItem
+import logging
+
+logger = logging.getLogger("downloader")
+
+_REFERER_MAP = {
+    "mangadex.org": "https://mangadex.org",
+    "uploads.mangadex.org": "https://mangadex.org",
+    "mangadex.network": "https://mangadex.org",
+    "allmanga.to": "https://allmanga.to",
+    "allanime.day": "https://allmanga.to",
+    "aln.youtube-anime.com": "https://allmanga.to",
+}
+
+
+def _get_referer(url: str) -> str:
+    try:
+        host = urlparse(url).hostname or ""
+        for domain, referer in _REFERER_MAP.items():
+            if host == domain or host.endswith("." + domain):
+                return referer
+    except Exception:
+        pass
+    return ""
 
 
 class DownloadManager:
@@ -29,10 +53,7 @@ class DownloadManager:
         self._running = True
         self._on_progress_cb: Optional[Callable] = None
         self._on_status_cb: Optional[Callable] = None
-        self._session = requests.Session()
-        self._session.headers.update({
-            "User-Agent": "Mozilla/5.0 (X11; Linux x86_64; rv:120.0) Gecko/20100101 Firefox/120.0",
-        })
+        self._session = create_http_session()
         self._start_workers()
 
     def _start_workers(self):
@@ -108,6 +129,7 @@ class DownloadManager:
         chapter_dir.mkdir(parents=True, exist_ok=True)
 
         downloaded = 0
+        success_count = 0
         try:
             for page in pages:
                 with self._lock:
@@ -125,6 +147,7 @@ class DownloadManager:
 
                 if dest.exists():
                     downloaded += 1
+                    success_count += 1
                     item.pages_downloaded = downloaded
                     item.progress = downloaded / max(len(pages), 1)
                     if self._on_progress_cb:
@@ -132,27 +155,40 @@ class DownloadManager:
                     continue
 
                 try:
-                    resp = self._session.get(url, timeout=20, stream=True)
+                    headers = {}
+                    referer = _get_referer(url)
+                    if referer:
+                        headers["Referer"] = referer
+                    resp = self._session.get(url, timeout=20, stream=True, headers=headers)
                     resp.raise_for_status()
                     with open(dest, "wb") as f:
                         for chunk in resp.iter_content(chunk_size=8192):
                             f.write(chunk)
                     downloaded += 1
+                    success_count += 1
                     item.pages_downloaded = downloaded
                     item.progress = downloaded / max(len(pages), 1)
                     if self._on_progress_cb:
                         self._on_progress_cb(chapter.id, downloaded, len(pages))
                 except Exception as e:
-                    print(f"[downloader] Failed page {page.index}: {e}")
+                    logger.warning("failed page %s: %s", page.index, e)
                     # Continue with remaining pages
                     downloaded += 1
 
-            item.status = DownloadStatus.DOWNLOADED
-            item.progress = 1.0
-            local_path = str(chapter_dir)
-            get_db().update_download_status(chapter.id, DownloadStatus.DOWNLOADED, local_path)
-            if self._on_status_cb:
-                self._on_status_cb(chapter.id, DownloadStatus.DOWNLOADED)
+            if success_count == len(pages):
+                item.status = DownloadStatus.DOWNLOADED
+                item.progress = 1.0
+                local_path = str(chapter_dir)
+                get_db().update_download_status(chapter.id, DownloadStatus.DOWNLOADED, local_path)
+                if self._on_status_cb:
+                    self._on_status_cb(chapter.id, DownloadStatus.DOWNLOADED)
+            else:
+                item.status = DownloadStatus.ERROR
+                failed = len(pages) - success_count
+                item.error_message = f"Failed to download {failed}/{len(pages)} pages"
+                get_db().update_download_status(chapter.id, DownloadStatus.ERROR)
+                if self._on_status_cb:
+                    self._on_status_cb(chapter.id, DownloadStatus.ERROR)
 
         except Exception as e:
             item.status = DownloadStatus.ERROR

@@ -6,7 +6,7 @@ gi.require_version("Gtk", "4.0")
 gi.require_version("Adw", "1")
 from gi.repository import Gtk, Adw, GdkPixbuf, Pango, GLib, Gdk
 from ..core.models import Manga
-from ..core import image_loader
+from ..core import disk_cache, image_loader
 
 
 class MangaCard(Gtk.Box):
@@ -116,6 +116,8 @@ class MangaCard(Gtk.Box):
             lambda pb: self._set_pixbuf(overlay, pb),
             width=self.CARD_WIDTH,
             height=self.CARD_HEIGHT,
+            # Covers live in their own cache so the page prune never drops one.
+            kind=disk_cache.KIND_COVER,
         )
 
     def _set_pixbuf(self, overlay, pixbuf):

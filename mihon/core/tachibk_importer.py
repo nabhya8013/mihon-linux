@@ -1,0 +1,380 @@
+"""
+Restore a Mihon Android backup (.tachibk) into the local library.
+
+The .tachibk format is a gzip-compressed protobuf message defined in
+Mihon's `Backup` schema (BackupManga, BackupCategory, BackupChapter,
+BackupTracking, BackupSource, BackupHistory, BrokenBackupSource,
+BrokenBackupHistory). The .proto file is bundled inline so we can build
+the descriptor dynamically with `google.protobuf` and avoid needing
+`protoc` to be installed.
+
+The importer is dry-run by default. Pass `apply=True` to write parsed
+entries into the local SQLite library.
+"""
+from __future__ import annotations
+
+import gzip
+import io
+import logging
+import time
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import List, Optional
+
+from google.protobuf import descriptor_pb2, descriptor_pool, message_factory, text_format
+
+from .database import get_db
+from .models import Manga, ReadingStatus
+from .source_ids import to_local_id
+
+logger = logging.getLogger("tachibk_importer")
+
+MIHON_BACKUP_PROTO = r"""
+name: "mihon_backup.proto"
+package: "MihonBackup"
+message_type {
+  name: "BackupManga"
+  field { name: "source" number: 1 label: LABEL_OPTIONAL type: TYPE_INT64 }
+  field { name: "url" number: 2 label: LABEL_OPTIONAL type: TYPE_STRING }
+  field { name: "title" number: 3 label: LABEL_OPTIONAL type: TYPE_STRING }
+  field { name: "artist" number: 4 label: LABEL_OPTIONAL type: TYPE_STRING }
+  field { name: "author" number: 5 label: LABEL_OPTIONAL type: TYPE_STRING }
+  field { name: "description" number: 6 label: LABEL_OPTIONAL type: TYPE_STRING }
+  field { name: "genre" number: 7 label: LABEL_REPEATED type: TYPE_STRING }
+  field { name: "status" number: 8 label: LABEL_OPTIONAL type: TYPE_INT32 }
+  field { name: "thumbnailUrl" number: 9 label: LABEL_OPTIONAL type: TYPE_STRING }
+  field { name: "dateAdded" number: 13 label: LABEL_OPTIONAL type: TYPE_INT64 }
+  field { name: "viewer" number: 14 label: LABEL_OPTIONAL type: TYPE_INT32 }
+  field { name: "chapters" number: 16 label: LABEL_REPEATED type: TYPE_MESSAGE type_name: ".MihonBackup.BackupChapter" }
+  field { name: "categories" number: 17 label: LABEL_REPEATED type: TYPE_INT64 }
+  field { name: "tracking" number: 18 label: LABEL_REPEATED type: TYPE_MESSAGE type_name: ".MihonBackup.BackupTracking" }
+  field { name: "favorite" number: 100 label: LABEL_OPTIONAL type: TYPE_BOOL }
+  field { name: "chapterFlags" number: 101 label: LABEL_OPTIONAL type: TYPE_INT32 }
+  field { name: "viewer_flags" number: 103 label: LABEL_OPTIONAL type: TYPE_INT32 }
+  field { name: "history" number: 104 label: LABEL_REPEATED type: TYPE_MESSAGE type_name: ".MihonBackup.BackupHistory" }
+  field { name: "updateStrategy" number: 105 label: LABEL_OPTIONAL type: TYPE_INT32 }
+  field { name: "lastModifiedAt" number: 106 label: LABEL_OPTIONAL type: TYPE_INT64 }
+  field { name: "favoriteModifiedAt" number: 107 label: LABEL_OPTIONAL type: TYPE_INT64 }
+  field { name: "excludedScanlators" number: 108 label: LABEL_REPEATED type: TYPE_STRING }
+  field { name: "version" number: 109 label: LABEL_OPTIONAL type: TYPE_INT64 }
+  field { name: "notes" number: 110 label: LABEL_OPTIONAL type: TYPE_STRING }
+  field { name: "initialized" number: 111 label: LABEL_OPTIONAL type: TYPE_BOOL }
+  field { name: "memo" number: 112 label: LABEL_OPTIONAL type: TYPE_BYTES }
+}
+message_type {
+  name: "BackupChapter"
+  field { name: "url" number: 1 label: LABEL_OPTIONAL type: TYPE_STRING }
+  field { name: "name" number: 2 label: LABEL_OPTIONAL type: TYPE_STRING }
+  field { name: "scanlator" number: 3 label: LABEL_OPTIONAL type: TYPE_STRING }
+  field { name: "read" number: 4 label: LABEL_OPTIONAL type: TYPE_BOOL }
+  field { name: "bookmark" number: 5 label: LABEL_OPTIONAL type: TYPE_BOOL }
+  field { name: "lastPageRead" number: 6 label: LABEL_OPTIONAL type: TYPE_INT32 }
+  field { name: "dateFetch" number: 7 label: LABEL_OPTIONAL type: TYPE_INT64 }
+  field { name: "dateUpload" number: 8 label: LABEL_OPTIONAL type: TYPE_INT64 }
+  field { name: "chapterNumber" number: 9 label: LABEL_OPTIONAL type: TYPE_FLOAT }
+  field { name: "sourceOrder" number: 10 label: LABEL_OPTIONAL type: TYPE_INT32 }
+  field { name: "lastModifiedAt" number: 100 label: LABEL_OPTIONAL type: TYPE_INT64 }
+  field { name: "version" number: 101 label: LABEL_OPTIONAL type: TYPE_INT64 }
+  field { name: "readNumber" number: 102 label: LABEL_OPTIONAL type: TYPE_INT32 }
+  field { name: "bookmarkNumber" number: 103 label: LABEL_OPTIONAL type: TYPE_INT32 }
+}
+message_type {
+  name: "BackupTracking"
+  field { name: "syncId" number: 1 label: LABEL_OPTIONAL type: TYPE_INT32 }
+  field { name: "libraryId" number: 2 label: LABEL_OPTIONAL type: TYPE_INT64 }
+  field { name: "mediaId" number: 3 label: LABEL_OPTIONAL type: TYPE_INT32 }
+  field { name: "trackingUrl" number: 4 label: LABEL_OPTIONAL type: TYPE_STRING }
+  field { name: "title" number: 5 label: LABEL_OPTIONAL type: TYPE_STRING }
+  field { name: "lastChapterRead" number: 6 label: LABEL_OPTIONAL type: TYPE_FLOAT }
+  field { name: "totalChapters" number: 7 label: LABEL_OPTIONAL type: TYPE_INT32 }
+  field { name: "score" number: 8 label: LABEL_OPTIONAL type: TYPE_FLOAT }
+  field { name: "status" number: 9 label: LABEL_OPTIONAL type: TYPE_INT32 }
+  field { name: "startedReadingDate" number: 10 label: LABEL_OPTIONAL type: TYPE_INT64 }
+  field { name: "finishedReadingDate" number: 11 label: LABEL_OPTIONAL type: TYPE_INT64 }
+}
+message_type {
+  name: "BackupCategory"
+  field { name: "name" number: 1 label: LABEL_OPTIONAL type: TYPE_STRING }
+  field { name: "order" number: 2 label: LABEL_OPTIONAL type: TYPE_INT64 }
+  field { name: "id" number: 3 label: LABEL_OPTIONAL type: TYPE_INT64 }
+  field { name: "flags" number: 100 label: LABEL_OPTIONAL type: TYPE_INT64 }
+}
+message_type {
+  name: "BackupSource"
+  field { name: "name" number: 1 label: LABEL_OPTIONAL type: TYPE_STRING }
+  field { name: "sourceId" number: 2 label: LABEL_OPTIONAL type: TYPE_INT64 }
+}
+message_type {
+  name: "BackupHistory"
+  field { name: "url" number: 1 label: LABEL_OPTIONAL type: TYPE_STRING }
+  field { name: "lastRead" number: 2 label: LABEL_OPTIONAL type: TYPE_INT64 }
+}
+message_type {
+  name: "Backup"
+  field { name: "backupManga" number: 1 label: LABEL_REPEATED type: TYPE_MESSAGE type_name: ".MihonBackup.BackupManga" }
+  field { name: "backupCategories" number: 2 label: LABEL_REPEATED type: TYPE_MESSAGE type_name: ".MihonBackup.BackupCategory" }
+  field { name: "backupSources" number: 101 label: LABEL_REPEATED type: TYPE_MESSAGE type_name: ".MihonBackup.BackupSource" }
+}
+"""
+
+_DESCRIPTOR_POOL: Optional[descriptor_pool.DescriptorPool] = None
+_BACKUP_MESSAGE = None
+
+
+def _ensure_message_classes():
+    global _DESCRIPTOR_POOL, _BACKUP_MESSAGE
+    if _BACKUP_MESSAGE is not None:
+        return _BACKUP_MESSAGE
+
+    file_proto = descriptor_pb2.FileDescriptorProto()
+    text_format.Parse(MIHON_BACKUP_PROTO, file_proto)
+    pool = descriptor_pool.DescriptorPool()
+    pool.Add(file_proto)
+    _DESCRIPTOR_POOL = pool
+    _BACKUP_MESSAGE = message_factory.GetMessageClass(
+        pool.FindMessageTypeByName("MihonBackup.Backup")
+    )
+    return _BACKUP_MESSAGE
+
+
+def _gunzip(path: Path) -> bytes:
+    with path.open("rb") as f:
+        magic = f.read(2)
+    with path.open("rb") as f:
+        if magic == b"\x1f\x8b":
+            return gzip.GzipFile(fileobj=f).read()
+        f.seek(0)
+        return f.read()
+
+
+@dataclass
+class RestoredManga:
+    source: int
+    url: str
+    title: str
+    author: str = ""
+    artist: str = ""
+    description: str = ""
+    genres: List[str] = field(default_factory=list)
+    status: int = 0
+    thumbnail_url: str = ""
+    date_added: int = 0
+    favorite: bool = True
+    chapter_count: int = 0
+    categories: List[int] = field(default_factory=list)
+    chapters: List[dict] = field(default_factory=list)
+    history: List[dict] = field(default_factory=list)
+
+
+@dataclass
+class RestoredBackup:
+    mangas: List[RestoredManga] = field(default_factory=list)
+    categories: List[tuple] = field(default_factory=list)  # (name, order)
+    sources: List[tuple] = field(default_factory=list)      # (name, source_id)
+    broken_sources: List[tuple] = field(default_factory=list)
+    total_bytes: int = 0
+
+
+def parse_backup(path: Path) -> RestoredBackup:
+    """Parse a .tachibk file into structured data without touching the DB."""
+    backup_cls = _ensure_message_classes()
+    raw = _gunzip(path)
+    msg = backup_cls()
+    msg.ParseFromString(raw)
+
+    backup = RestoredBackup(total_bytes=len(raw))
+    for category in msg.backupCategories:
+        backup.categories.append((category.name, category.order))
+    for source in msg.backupSources:
+        backup.sources.append((source.name, source.sourceId))
+    for manga in msg.backupManga:
+        # Android Mihon uses `favorite: Boolean = true` as the Kotlin
+        # default. kotlinx.serialization.protobuf omits `true` from the
+        # wire format, so a missing field must be treated as `true`.
+        is_favorite = True
+        if hasattr(manga, "HasField") and manga.HasField("favorite"):
+            is_favorite = bool(manga.favorite)
+
+        restored = RestoredManga(
+            source=manga.source,
+            url=manga.url,
+            title=manga.title,
+            author=manga.author or "",
+            artist=manga.artist or "",
+            description=manga.description or "",
+            genres=list(manga.genre),
+            status=manga.status,
+            thumbnail_url=manga.thumbnailUrl or "",
+            date_added=manga.dateAdded,
+            favorite=is_favorite,
+            chapter_count=len(manga.chapters),
+            categories=[int(c) for c in manga.categories],
+            chapters=[
+                {
+                    "url": ch.url,
+                    "name": ch.name,
+                    "scanlator": ch.scanlator or "",
+                    "read": ch.read,
+                    "bookmark": ch.bookmark,
+                    "last_page_read": ch.lastPageRead,
+                    "date_fetch": ch.dateFetch,
+                    "date_upload": ch.dateUpload,
+                    "chapter_number": ch.chapterNumber,
+                    "source_order": ch.sourceOrder,
+                }
+                for ch in manga.chapters
+            ],
+            history=[
+                {"url": h.url, "last_read": h.lastRead} for h in manga.history
+            ],
+        )
+        backup.mangas.append(restored)
+    return backup
+
+
+def _status_to_string(status: int) -> str:
+    """
+    Map Android's `SManga` status enum onto the local string status.
+
+    0 is UNKNOWN, not ONGOING — an earlier version of this map was shifted by
+    one, which reported every ongoing series as completed.
+    """
+    return {
+        0: "",
+        1: "ongoing",
+        2: "completed",
+        3: "licensed",
+        4: "publishing finished",
+        5: "cancelled",
+        6: "on hiatus",
+    }.get(status, "")
+
+
+def _manga_to_library(manga: RestoredManga) -> Manga:
+    return Manga(
+        # A backup this app exported carries the numeric id of a built-in
+        # source, so map it back to that source's name. Otherwise re-importing
+        # our own backup would add a second copy of every manga.
+        source_id=to_local_id(manga.source),
+        source_manga_id=manga.url,
+        title=manga.title,
+        alt_titles=[],
+        author=manga.author,
+        artist=manga.artist,
+        description=manga.description,
+        genres=manga.genres,
+        status=_status_to_string(manga.status),
+        cover_url=manga.thumbnail_url,
+        url=manga.url,
+        in_library=manga.favorite,
+        reading_status=ReadingStatus.NONE,
+        unread_count=sum(1 for c in manga.chapters if not c["read"]),
+        chapter_count=manga.chapter_count,
+        last_read_at=max(
+            (h["last_read"] / 1000.0 for h in manga.history if h["last_read"]),
+            default=None,
+        ),
+        added_at=(manga.date_added / 1000.0) if manga.date_added else time.time(),
+    )
+
+
+@dataclass
+class ImportResult:
+    backup: Optional[RestoredBackup] = None
+    applied: bool = False
+    imported_manga: int = 0
+    imported_categories: int = 0
+    errors: List[str] = field(default_factory=list)
+
+    @property
+    def ok(self) -> bool:
+        return not self.errors
+
+    def summary(self) -> str:
+        if self.backup is None:
+            return "No backup loaded"
+        if self.applied:
+            return (
+                f"Imported {self.imported_manga} manga, "
+                f"{self.imported_categories} categories, "
+                f"{len(self.errors)} errors"
+            )
+        return (
+            f"Parsed {len(self.backup.mangas)} manga, "
+            f"{len(self.backup.categories)} categories "
+            f"(dry run, no DB changes)"
+        )
+
+
+def import_tachibk(
+    path: Path,
+    *,
+    apply: bool = False,
+    add_to_default_category: bool = True,
+) -> ImportResult:
+    """Parse a .tachibk file and (optionally) write it into the DB."""
+    try:
+        backup = parse_backup(path)
+    except Exception as exc:
+        logger.exception("Failed to parse backup %s", path)
+        return ImportResult(backup=None, errors=[f"Failed to parse backup: {exc}"])
+
+    result = ImportResult(backup=backup, applied=False)
+    if not apply or not backup.mangas:
+        return result
+
+    db = get_db()
+
+    category_id_by_order: dict[int, int] = {}
+    existing_categories = {c.name.lower(): c.id for c in db.get_categories()}
+    for name, order in backup.categories:
+        if not name:
+            continue
+        key = name.lower()
+        if key in existing_categories:
+            category_id_by_order[order] = existing_categories[key]
+            continue
+        category_id_by_order[order] = db.create_category(name)
+        existing_categories[key] = category_id_by_order[order]
+        result.imported_categories += 1
+
+    default_category_id: Optional[int] = None
+    if add_to_default_category:
+        existing_categories = {c.name.lower(): c.id for c in db.get_categories()}
+        target = "Imported"
+        if target.lower() in existing_categories:
+            default_category_id = existing_categories[target.lower()]
+        else:
+            default_category_id = db.create_category(target)
+            result.imported_categories += 1
+
+    for restored in backup.mangas:
+        try:
+            manga = _manga_to_library(restored)
+            db.upsert_manga(manga)
+        except Exception as exc:  # pragma: no cover
+            result.errors.append(f"DB write failed for {restored.title!r}: {exc}")
+            continue
+
+        row = db.get_manga_by_source(manga.source_id, manga.source_manga_id)
+        if row is None:
+            continue
+        if default_category_id is not None:
+            db.add_manga_to_category_bulk([row.id], default_category_id)
+        for category_index in restored.categories:
+            category_id = category_id_by_order.get(category_index)
+            if category_id is not None:
+                db.add_manga_to_category_bulk([row.id], category_id)
+        result.imported_manga += 1
+
+    result.applied = True
+    return result
+
+
+__all__ = [
+    "ImportResult",
+    "RestoredBackup",
+    "RestoredManga",
+    "import_tachibk",
+    "parse_backup",
+]

@@ -45,6 +45,10 @@ class Manga:
     cover_url: str = ""
     url: str = ""
     in_library: bool = False
+    # Whether the source has filled in the full details (SManga.initialized).
+    # False means the manga came from a browse/search listing, which carries
+    # only title and cover, so details are still worth fetching.
+    initialized: bool = False
     reading_status: ReadingStatus = ReadingStatus.NONE
     unread_count: int = 0
     chapter_count: int = 0
@@ -56,6 +60,9 @@ class Manga:
     score: float = 0.0
     year: Optional[int] = None
     content_rating: str = "safe"
+    # Opaque per-source payload (Tachiyomi SManga.memo), round-tripped
+    # verbatim so API-driven sources can read it back when fetching chapters.
+    source_memo: str = ""
 
 
 @dataclass
@@ -69,6 +76,10 @@ class Chapter:
     scanlator: str = ""
     uploaded_at: Optional[float] = None
     fetched_at: Optional[float] = None
+    # Position in the list the source returned, newest first, mirroring
+    # Tachiyomi's SChapter source_order. Sources whose chapters have no usable
+    # numbering rely on this ordering rather than on chapter_number.
+    source_order: int = 0
     read: bool = False
     last_page_read: int = 0
     page_count: int = 0
@@ -112,6 +123,10 @@ class SearchFilter:
     status: str = ""
     sort_by: str = "relevance"
     content_rating: List[str] = field(default_factory=list)
+    # Source-defined filter state, shaped like the dicts Extension.get_filters()
+    # returns. Each entry keeps its positional 'index' so a source can map it
+    # back onto its own FilterList. Empty for sources without custom filters.
+    source_filters: List[dict] = field(default_factory=list)
 
 
 @dataclass

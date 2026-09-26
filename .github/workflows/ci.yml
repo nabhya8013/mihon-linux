@@ -1,0 +1,132 @@
+name: CI
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  # Only the newest run of a branch matters; cancel the rest.
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  python:
+    name: Python tests
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install GTK4 and libadwaita
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            python3-gi python3-gi-cairo gir1.2-gtk-4.0 gir1.2-adw-1 \
+            gir1.2-secret-1 libgirepository1.0-dev libcairo2-dev \
+            xvfb desktop-file-utils appstream
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install Python dependencies
+        run: |
+          python -m pip install --upgrade pip
+          # PyGObject comes from apt above; installing it from pip as well
+          # would shadow the system typelibs.
+          pip install pytest
+          pip install $(grep -v '^PyGObject' requirements.txt | tr '\n' ' ')
+
+      - name: Run tests
+        # Several tests build real GTK widgets, so they need a display.
+        run: xvfb-run -a python -m pytest tests/ -v
+        env:
+          PYTHONPATH: ${{ github.workspace }}
+          GI_TYPELIB_PATH: /usr/lib/x86_64-linux-gnu/girepository-1.0
+
+      - name: Check every module imports
+        run: |
+          xvfb-run -a python - <<'PY'
+          import importlib, pkgutil
+          import mihon
+          failed = []
+          for module in pkgutil.walk_packages(mihon.__path__, "mihon."):
+              try:
+                  importlib.import_module(module.name)
+              except Exception as exc:
+                  failed.append(f"{module.name}: {exc}")
+          if failed:
+              raise SystemExit("Import failures:\n" + "\n".join(failed))
+          print("All modules import cleanly.")
+          PY
+
+  lint:
+    name: Lint
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install ruff
+        run: pip install ruff
+
+      - name: Check syntax and obvious errors
+        # Deliberately narrow: this repository has no formatting policy yet,
+        # so only real errors fail the build.
+        run: ruff check --select E9,F63,F7,F82 --output-format=github mihon/ tests/
+
+  metadata:
+    name: Desktop metadata
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install validators
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends desktop-file-utils appstream
+
+      - name: Validate the desktop entry
+        run: desktop-file-validate data/io.github.nabhya8013.MihonLinux.desktop
+
+      - name: Validate the AppStream metadata
+        run: appstreamcli validate data/io.github.nabhya8013.MihonLinux.metainfo.xml
+
+  bridge:
+    name: Bridge JAR
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+
+      - name: Cache Gradle
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+          key: gradle-${{ hashFiles('bridge/**/*.gradle*', 'bridge/gradle/wrapper/gradle-wrapper.properties') }}
+          restore-keys: gradle-
+
+      - name: Build and test
+        working-directory: bridge
+        run: ./gradlew --no-daemon test jar
+
+      - name: Upload the JAR
+        uses: actions/upload-artifact@v4
+        with:
+          name: mihon-bridge
+          path: bridge/build/libs/*.jar
+          if-no-files-found: error

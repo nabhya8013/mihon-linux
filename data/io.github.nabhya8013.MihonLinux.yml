@@ -1,0 +1,69 @@
+# Flatpak manifest for Mihon for Linux.
+#
+# Build and install locally:
+#
+#     flatpak install -y flathub org.gnome.Platform//47 org.gnome.Sdk//47
+#     flatpak-builder --user --install --force-clean build-dir \
+#         data/io.github.nabhya8013.MihonLinux.yml
+#
+# The Python dependencies below are declared as a placeholder module. Before
+# submitting anywhere, regenerate it with flatpak-pip-generator so every wheel
+# is pinned by hash:
+#
+#     python3 flatpak-pip-generator --requirements-file=requirements.txt \
+#         --output data/python3-requirements
+app-id: io.github.nabhya8013.MihonLinux
+runtime: org.gnome.Platform
+runtime-version: "47"
+sdk: org.gnome.Sdk
+
+command: mihon-linux
+
+finish-args:
+  # GTK4 on Wayland, with an X11 fallback.
+  - --socket=wayland
+  - --socket=fallback-x11
+  - --share=ipc
+  - --device=dri
+
+  # Sources are fetched over the network.
+  - --share=network
+
+  # Tracker OAuth tokens live in the login keyring.
+  - --talk-name=org.freedesktop.secrets
+
+  # The user picks their own local manga folder, so the portal handles access
+  # rather than granting the whole home directory up front.
+  - --filesystem=xdg-download
+  - --filesystem=xdg-documents
+
+# NOT YET BUILDABLE. The Python dependencies module below is missing, and a
+# Flatpak build has no network access, so every wheel has to be declared as a
+# hash-pinned source first. Generate it with:
+#
+#     git clone https://github.com/flatpak/flatpak-builder-tools
+#     python3 flatpak-builder-tools/pip/flatpak-pip-generator #         --requirements-file=requirements.txt #         --output data/python3-requirements
+#
+# then add `- data/python3-requirements.json` as the first entry under
+# `modules`. It is left out rather than stubbed, so a build fails loudly
+# instead of appearing to work.
+modules:
+  # The JVM bridge is not bundled: it needs a JDK, and extension APKs are user
+  # supplied. Built-in sources work without it.
+  - name: mihon-linux
+    buildsystem: simple
+    build-commands:
+      - install -Dm755 mihon.sh ${FLATPAK_DEST}/bin/mihon-linux
+      - cp -r mihon ${FLATPAK_DEST}/share/mihon-linux-app
+      - install -Dm644 run.py ${FLATPAK_DEST}/share/mihon-linux-app/run.py
+      - install -Dm644 data/io.github.nabhya8013.MihonLinux.desktop
+        ${FLATPAK_DEST}/share/applications/io.github.nabhya8013.MihonLinux.desktop
+      - install -Dm644 data/io.github.nabhya8013.MihonLinux.metainfo.xml
+        ${FLATPAK_DEST}/share/metainfo/io.github.nabhya8013.MihonLinux.metainfo.xml
+      - install -Dm644 data/icons/hicolor/scalable/apps/io.github.nabhya8013.MihonLinux.svg
+        ${FLATPAK_DEST}/share/icons/hicolor/scalable/apps/io.github.nabhya8013.MihonLinux.svg
+      - install -Dm644 data/icons/hicolor/symbolic/apps/io.github.nabhya8013.MihonLinux-symbolic.svg
+        ${FLATPAK_DEST}/share/icons/hicolor/symbolic/apps/io.github.nabhya8013.MihonLinux-symbolic.svg
+    sources:
+      - type: dir
+        path: ..

@@ -6,12 +6,29 @@ Browse/Explore view — mirrors the Android Mihon Browse tab with two sections:
 import gi
 gi.require_version("Gtk", "4.0")
 gi.require_version("Adw", "1")
-from gi.repository import Gtk, Adw, GLib, Gio
+from gi.repository import Gtk, Adw, GLib, Gio, Gdk
+import logging
 import threading
-import os
 from ..core.models import SearchFilter
+from ..core.database import get_db
 from ..extensions.registry import get_registry
+from ..extensions.repo_manager import get_repo_manager
 from .widgets import MangaGridView, EmptyState, LoadingSpinner
+from .filters import FilterDialog
+from .notify import notify, notify_error, notify_retry
+from ..core.global_search import (
+    GlobalSearch,
+    STATUS_EMPTY,
+    STATUS_ERROR,
+    STATUS_OK,
+    STATUS_TIMEOUT,
+)
+
+logger = logging.getLogger("browse")
+
+# Per-source budget for a global search. One unresponsive source must not
+# hold up every other source's results.
+SOURCE_SEARCH_TIMEOUT = 10.0
 
 
 class BrowseView(Gtk.Box):
@@ -49,6 +66,12 @@ class BrowseView(Gtk.Box):
         # ── Extensions Tab ────────────────────────────────────────────────
         extensions_page = self._build_extensions_tab()
         self._view_stack.add_titled_with_icon(extensions_page, "extensions", "Extensions", "application-x-addon-symbolic")
+
+        # ── Migrate Tab ───────────────────────────────────────────────────
+        migrate_page = self._build_migrate_tab()
+        self._view_stack.add_titled_with_icon(
+            migrate_page, "migrate", "Global Search", "system-search-symbolic"
+        )
 
         self._view_stack.set_visible_child_name("sources")
 
@@ -135,6 +158,28 @@ class BrowseView(Gtk.Box):
     #  EXTENSIONS TAB
     # ══════════════════════════════════════════════════════════════════════
 
+    def _enable_apk_drop(self, widget):
+        """
+        Accept an APK dropped onto the Extensions tab.
+
+        GTK4 hands over a Gio.File, so the drop is the same install path as
+        the file chooser once the path is read off it.
+        """
+        target = Gtk.DropTarget.new(Gio.File, Gdk.DragAction.COPY)
+        target.connect("drop", self._on_apk_dropped)
+        widget.add_controller(target)
+
+    def _on_apk_dropped(self, _target, value, _x, _y):
+        path = value.get_path() if hasattr(value, "get_path") else None
+        if not path:
+            notify_error(self, "That item is not a file on this machine.")
+            return False
+        if not path.lower().endswith(".apk"):
+            notify_error(self, "Only .apk extension files can be installed.")
+            return False
+        self._install_apk(path)
+        return True
+
     def _build_extensions_tab(self) -> Gtk.Widget:
         scroll = Gtk.ScrolledWindow()
         scroll.set_vexpand(True)
@@ -150,7 +195,7 @@ class BrowseView(Gtk.Box):
         install_group.set_description("Install Tachiyomi-compatible extensions from APK files")
 
         install_row = Adw.ActionRow(title="Install from file…")
-        install_row.set_subtitle("Select a Tachiyomi extension APK")
+        install_row.set_subtitle("Select an APK, or drop one anywhere on this tab")
         install_icon = Gtk.Image.new_from_icon_name("document-open-symbolic")
         install_row.add_prefix(install_icon)
         install_btn = Gtk.Button(icon_name="list-add-symbolic")
@@ -184,30 +229,534 @@ class BrowseView(Gtk.Box):
         jvm_group.add(self._jvm_list)
 
         self._jvm_empty = Adw.ActionRow(title="No extensions installed")
-        self._jvm_empty.set_subtitle("Use 'Install from file' above to add Tachiyomi APK extensions")
+        self._jvm_empty.set_subtitle("Browse the catalog below or install an APK from file")
         self._jvm_list.append(self._jvm_empty)
 
+        # ── Available (from configured extension repos) ────────────────────
+        available_group = Adw.PreferencesGroup(title="Available")
+        available_group.set_description(
+            "Extensions published by your configured repositories"
+        )
+        box.append(available_group)
+
+        controls = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        controls.set_margin_bottom(8)
+
+        self._repo_search = Gtk.SearchEntry()
+        self._repo_search.set_placeholder_text("Search available extensions…")
+        self._repo_search.set_hexpand(True)
+        self._repo_search.connect("search-changed", lambda *_: self._render_available())
+        controls.append(self._repo_search)
+
+        self._repo_refresh_btn = Gtk.Button(icon_name="view-refresh-symbolic")
+        self._repo_refresh_btn.add_css_class("flat")
+        self._repo_refresh_btn.set_tooltip_text("Refresh extension catalog")
+        self._repo_refresh_btn.connect("clicked", lambda *_: self._load_available(force=True))
+        controls.append(self._repo_refresh_btn)
+        available_group.add(controls)
+
+        self._repo_status = Gtk.Label(label="Loading extension catalog…")
+        self._repo_status.add_css_class("dim-label")
+        self._repo_status.set_xalign(0)
+        self._repo_status.set_margin_bottom(4)
+        available_group.add(self._repo_status)
+
+        self._available_list = Gtk.ListBox()
+        self._available_list.set_selection_mode(Gtk.SelectionMode.NONE)
+        self._available_list.add_css_class("boxed-list")
+        available_group.add(self._available_list)
+
+        self._repo_entries = []
+        self._repo_loading = False
+
         scroll.set_child(box)
+        self._enable_apk_drop(scroll)
         self._load_extensions()
+        self._load_available()
         return scroll
+
+    # ── Extension catalog (remote repos) ──────────────────────────────────
+
+    #: Rendering every entry would build thousands of widgets; the list is a
+    #: search surface, not something anyone scrolls end to end.
+    MAX_AVAILABLE_ROWS = 60
+
+    def reload_available(self):
+        """Re-fetch the repository index. Called when the repo set changes."""
+        self._load_available(force=True)
+
+    def _load_available(self, force: bool = False):
+        """Fetch repo indexes on a background thread."""
+        if self._repo_loading:
+            return
+        self._repo_loading = True
+        self._repo_status.set_text("Loading extension catalog…")
+
+        def work():
+            try:
+                from ..extensions.repo_manager import get_repo_manager
+                entries = get_repo_manager().fetch_all(force=force)
+                GLib.idle_add(self._on_available_loaded, entries)
+            except Exception as e:
+                GLib.idle_add(self._on_available_error, str(e))
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def _on_available_loaded(self, entries):
+        self._repo_loading = False
+        self._repo_entries = entries
+        self._render_available()
+
+    def _on_available_error(self, message: str):
+        self._repo_loading = False
+        self._repo_entries = []
+        self._clear_list(self._available_list)
+        self._repo_status.set_text(f"Could not load catalog: {message}")
+
+    def _render_available(self):
+        self._clear_list(self._available_list)
+        if not self._repo_entries:
+            return
+
+        from ..extensions.repo_manager import get_repo_manager
+        installed = get_repo_manager().installed_versions()
+
+        query = self._repo_search.get_text().strip().lower()
+        matches = [
+            e for e in self._repo_entries
+            if not query
+            or query in e.display_name.lower()
+            or query in e.lang.lower()
+            or any(query in l.lower() for l in e.languages)
+        ]
+
+        updatable = sum(
+            1 for e in matches
+            if e.pkg in installed and e.version_code > installed[e.pkg]
+        )
+        shown = matches[: self.MAX_AVAILABLE_ROWS]
+
+        status = f"{len(matches)} extension(s)"
+        if len(matches) > len(shown):
+            status += f" — showing first {len(shown)}, refine your search"
+        if updatable:
+            status += f" • {updatable} update(s) available"
+        self._repo_status.set_text(status)
+
+        for entry in shown:
+            self._available_list.append(self._build_available_row(entry, installed))
+
+    def _build_available_row(self, entry, installed: dict) -> Adw.ActionRow:
+        row = Adw.ActionRow(title=entry.display_name)
+        langs = ", ".join(entry.languages[:4]).upper()
+        row.set_subtitle(f"v{entry.version} • {langs}")
+
+        icon = Gtk.Image.new_from_icon_name("application-x-addon-symbolic")
+        icon.set_pixel_size(32)
+        row.add_prefix(icon)
+        self._load_extension_icon(entry, icon)
+
+        if entry.nsfw:
+            badge = Gtk.Label(label="18+")
+            badge.add_css_class("caption")
+            badge.add_css_class("error")
+            badge.set_valign(Gtk.Align.CENTER)
+            row.add_suffix(badge)
+
+        current = installed.get(entry.pkg)
+        if current is not None and entry.version_code > current:
+            label, css = "Update", "suggested-action"
+        elif current is not None:
+            label, css = "Reinstall", "flat"
+        else:
+            label, css = "Install", "flat"
+
+        button = Gtk.Button(label=label)
+        button.add_css_class(css)
+        button.set_valign(Gtk.Align.CENTER)
+        button.connect("clicked", self._on_install_from_repo, entry)
+        row.add_suffix(button)
+        return row
+
+    def _load_extension_icon(self, entry, image: Gtk.Image):
+        """
+        Swap the generic add-on icon for the extension's own, once cached.
+
+        Icons are fetched on a worker thread and written under the repo icon
+        directory, so a second visit to the tab paints them immediately.
+        """
+        if not entry.icon_url:
+            return
+
+        def work():
+            try:
+                path = get_repo_manager().download_icon(entry)
+            except Exception as exc:
+                logger.debug("icon fetch failed for %s: %s", entry.pkg, exc)
+                return
+            if path:
+                GLib.idle_add(self._apply_extension_icon, image, path)
+
+        threading.Thread(target=work, daemon=True).start()
+
+    @staticmethod
+    def _apply_extension_icon(image: Gtk.Image, path: str):
+        try:
+            image.set_from_file(path)
+            image.set_pixel_size(32)
+        except Exception:
+            # A truncated or unreadable icon just leaves the placeholder.
+            pass
+        return False
+
+    def _on_install_from_repo(self, button, entry):
+        button.set_sensitive(False)
+        button.set_label("Installing…")
+
+        def work():
+            try:
+                from ..extensions.extension_manager import get_extension_manager
+                proxies = get_extension_manager().install_from_repo(entry)
+                if proxies:
+                    registry = get_registry()
+                    for proxy in proxies:
+                        registry.register(proxy)
+                    GLib.idle_add(self._on_install_success, [entry.display_name])
+                else:
+                    GLib.idle_add(
+                        self._on_install_error,
+                        f"{entry.display_name} could not be loaded",
+                    )
+            except Exception as e:
+                GLib.idle_add(self._on_install_error, str(e))
+            finally:
+                GLib.idle_add(self._render_available)
+
+        threading.Thread(target=work, daemon=True).start()
+
+    @staticmethod
+    def _clear_list(listbox: Gtk.ListBox):
+        child = listbox.get_first_child()
+        while child:
+            nxt = child.get_next_sibling()
+            listbox.remove(child)
+            child = nxt
+
+    # ══════════════════════════════════════════════════════════════════════
+    #  MIGRATE TAB
+    # ══════════════════════════════════════════════════════════════════════
+
+    def focus_global_search(self, query: str = ""):
+        """Open the Global Search tab and put the cursor in its query box."""
+        self._view_stack.set_visible_child_name("migrate")
+        if query:
+            self._migrate_query_entry.set_text(query)
+        self._migrate_query_entry.grab_focus()
+
+    def _build_migrate_tab(self) -> Gtk.Widget:
+        self._migrate_searching = False
+        self._migrate_search = None
+        self._migrate_sections = {}
+        self._migrate_total = 0
+
+        root = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=0)
+
+        controls = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
+        controls.set_margin_start(16)
+        controls.set_margin_end(16)
+        controls.set_margin_top(16)
+        controls.set_margin_bottom(8)
+
+        title = Gtk.Label(label="Global Search")
+        title.add_css_class("title-4")
+        title.set_xalign(0)
+        controls.append(title)
+
+        help_text = Gtk.Label(
+            label=(
+                "Search every installed source at once. Results appear per source "
+                "as each one answers, so a slow source does not hold up the rest. "
+                "Use this to find a title on a new source before migrating. "
+                "Optional query filters: src:<source-name> and id:<source-id>."
+            )
+        )
+        help_text.add_css_class("dim-label")
+        help_text.set_wrap(True)
+        help_text.set_xalign(0)
+        controls.append(help_text)
+
+        self._migrate_reference_entry = Gtk.Entry()
+        self._migrate_reference_entry.set_placeholder_text("Reference title (optional)")
+        controls.append(self._migrate_reference_entry)
+
+        query_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        self._migrate_query_entry = Gtk.SearchEntry()
+        self._migrate_query_entry.set_placeholder_text("Search query (supports src: and id:)")
+        self._migrate_query_entry.set_hexpand(True)
+        self._migrate_query_entry.connect("activate", self._start_migrate_search)
+        query_row.append(self._migrate_query_entry)
+
+        self._migrate_search_btn = Gtk.Button(label="Search Sources")
+        self._migrate_search_btn.add_css_class("suggested-action")
+        self._migrate_search_btn.connect("clicked", self._start_migrate_search)
+        query_row.append(self._migrate_search_btn)
+        controls.append(query_row)
+
+        self._migrate_status_label = Gtk.Label(label="Ready to search")
+        self._migrate_status_label.add_css_class("dim-label")
+        self._migrate_status_label.set_xalign(0)
+        controls.append(self._migrate_status_label)
+
+        root.append(controls)
+        root.append(Gtk.Separator())
+
+        self._migrate_stack = Gtk.Stack()
+        self._migrate_stack.set_vexpand(True)
+        self._migrate_stack.set_transition_type(Gtk.StackTransitionType.CROSSFADE)
+
+        self._migrate_loading = LoadingSpinner("Searching installed sources...")
+        self._migrate_stack.add_named(self._migrate_loading, "loading")
+
+        self._migrate_empty = EmptyState(
+            "system-search-symbolic",
+            "No results yet",
+            "Search all sources to find a migration target",
+        )
+        self._migrate_stack.add_named(self._migrate_empty, "empty")
+
+        # One section per source, stacked, so results can stream in per source.
+        self._migrate_results_box = Gtk.Box(
+            orientation=Gtk.Orientation.VERTICAL, spacing=8
+        )
+        self._migrate_results_box.set_margin_top(8)
+        self._migrate_results_box.set_margin_bottom(16)
+        migrate_scroll = Gtk.ScrolledWindow()
+        migrate_scroll.set_vexpand(True)
+        migrate_scroll.set_child(self._migrate_results_box)
+        self._migrate_stack.add_named(migrate_scroll, "results")
+
+        self._migrate_stack.set_visible_child_name("empty")
+        root.append(self._migrate_stack)
+        return root
+
+    def _start_migrate_search(self, *_):
+        if self._migrate_searching:
+            return
+
+        raw_query = self._migrate_query_entry.get_text().strip()
+        reference_query = self._migrate_reference_entry.get_text().strip()
+        query, src_filter, id_filter = self._parse_migrate_query(raw_query)
+        if not query:
+            query = reference_query
+        if not query:
+            self._migrate_empty.set_title("Query required")
+            self._migrate_status_label.set_text("Enter a title or search term to find migration candidates.")
+            self._migrate_stack.set_visible_child_name("empty")
+            return
+
+        sources = self._filter_sources_for_migrate(src_filter, id_filter)
+        if not sources:
+            self._migrate_empty.set_title("No matching sources")
+            self._migrate_status_label.set_text("No installed source matched the src:/id: filters.")
+            self._migrate_stack.set_visible_child_name("empty")
+            return
+
+        if self._migrate_search is not None:
+            self._migrate_search.cancel()
+
+        self._migrate_searching = True
+        self._migrate_search_btn.set_sensitive(False)
+        self._clear_migrate_results()
+        self._migrate_sections = {}
+        self._migrate_total = 0
+        self._migrate_status_label.set_text(f"Searching {len(sources)} sources...")
+        self._migrate_stack.set_visible_child_name("results")
+
+        # One section per source, all shown up front as pending, so the user
+        # can see which sources are still working.
+        for ext in sources:
+            self._migrate_sections[ext.id] = self._build_migrate_section(ext)
+
+        search = GlobalSearch(sources, timeout=SOURCE_SEARCH_TIMEOUT)
+        self._migrate_search = search
+
+        def run():
+            search.run(
+                query,
+                on_source_done=lambda result: GLib.idle_add(
+                    self._on_migrate_source_done, search, result
+                ),
+                on_complete=lambda results: GLib.idle_add(
+                    self._on_migrate_search_done, search, results, query
+                ),
+            )
+
+        threading.Thread(target=run, daemon=True).start()
+
+    def _build_migrate_section(self, ext):
+        """A per-source group: header row with status, plus its result rows."""
+        group = Adw.PreferencesGroup(title=ext.name)
+        group.set_margin_start(16)
+        group.set_margin_end(16)
+        group.set_margin_top(8)
+
+        status = Gtk.Label(label="Searching…")
+        status.add_css_class("dim-label")
+        group.set_header_suffix(status)
+
+        rows = Gtk.ListBox()
+        rows.set_selection_mode(Gtk.SelectionMode.NONE)
+        rows.add_css_class("boxed-list")
+        group.add(rows)
+
+        self._migrate_results_box.append(group)
+        return {"group": group, "status": status, "rows": rows, "ext": ext}
+
+    def _on_migrate_source_done(self, search, result):
+        """Render one source's results as soon as that source answers."""
+        if search is not self._migrate_search:
+            return False  # A newer search replaced this one.
+
+        section = self._migrate_sections.get(result.source_id)
+        if section is None:
+            return False
+
+        if result.status == STATUS_OK:
+            section["status"].set_text(f"{result.count} results")
+            for manga in result.manga:
+                section["rows"].append(self._build_migrate_row(section["ext"], manga))
+            self._migrate_total += result.count
+        elif result.status == STATUS_EMPTY:
+            section["status"].set_text("No results")
+        elif result.status == STATUS_TIMEOUT:
+            section["status"].set_text("Timed out")
+            section["status"].set_tooltip_text(result.error)
+        else:
+            section["status"].set_text("Failed")
+            section["status"].set_tooltip_text(result.error)
+
+        pending = sum(
+            1 for sid, sec in self._migrate_sections.items()
+            if sec["status"].get_text() == "Searching…"
+        )
+        done = len(self._migrate_sections) - pending
+        self._migrate_status_label.set_text(
+            f"{done}/{len(self._migrate_sections)} sources answered · "
+            f"{self._migrate_total} results"
+        )
+        return False
+
+    def _build_migrate_row(self, ext, manga) -> Adw.ActionRow:
+        row = Adw.ActionRow(title=manga.title or "Untitled")
+        if manga.author:
+            row.set_subtitle(manga.author)
+
+        open_btn = Gtk.Button(icon_name="go-next-symbolic")
+        open_btn.add_css_class("flat")
+        open_btn.set_valign(Gtk.Align.CENTER)
+        open_btn.set_tooltip_text("Open details")
+        open_btn.connect("clicked", lambda *_btn, m=manga: self._open_migrate_candidate(m))
+
+        add_btn = Gtk.Button(icon_name="list-add-symbolic")
+        add_btn.add_css_class("flat")
+        add_btn.set_valign(Gtk.Align.CENTER)
+        add_btn.set_tooltip_text("Add to library")
+        add_btn.connect(
+            "clicked", lambda *_btn, m=manga: self._add_migrate_candidate_to_library(m)
+        )
+
+        row.add_suffix(add_btn)
+        row.add_suffix(open_btn)
+        row.set_activatable(True)
+        row.connect("activated", lambda _row, m=manga: self._open_migrate_candidate(m))
+        return row
+
+    def _on_migrate_search_done(self, search, results, query):
+        if search is not self._migrate_search:
+            return False
+
+        self._migrate_searching = False
+        self._migrate_search_btn.set_sensitive(True)
+
+        failed = [r for r in results if r.status in (STATUS_ERROR, STATUS_TIMEOUT)]
+        if self._migrate_total == 0:
+            self._migrate_empty.set_title("No migration matches")
+            self._migrate_status_label.set_text(
+                f"No source returned matches for '{query}'."
+            )
+            self._migrate_stack.set_visible_child_name("empty")
+            return False
+
+        if failed:
+            self._migrate_status_label.set_text(
+                f"Found {self._migrate_total} results across "
+                f"{len(results) - len(failed)} sources ({len(failed)} failed)."
+            )
+        else:
+            self._migrate_status_label.set_text(
+                f"Found {self._migrate_total} results across {len(results)} sources."
+            )
+        return False
+
+    def _open_migrate_candidate(self, manga):
+        if self._on_manga_selected:
+            self._on_manga_selected(manga)
+
+    def _add_migrate_candidate_to_library(self, manga):
+        try:
+            db = get_db()
+            manga_id = db.upsert_manga(manga)
+            db.add_to_library(manga_id)
+            manga.id = manga_id
+            manga.in_library = True
+            self._migrate_status_label.set_text(
+                f"Added '{manga.title}' to library. Open details to verify before removing old source."
+            )
+        except Exception as e:
+            self._migrate_status_label.set_text(f"Failed to add '{manga.title}': {e}")
+
+    def _clear_migrate_results(self):
+        child = self._migrate_results_box.get_first_child()
+        while child:
+            nxt = child.get_next_sibling()
+            self._migrate_results_box.remove(child)
+            child = nxt
+        self._migrate_sections = {}
+        self._migrate_total = 0
+
+    @staticmethod
+    def _parse_migrate_query(raw_query: str):
+        src_filter = ""
+        id_filter = ""
+        terms = []
+        for token in raw_query.split():
+            lower = token.lower()
+            if lower.startswith("src:") and len(token) > 4:
+                src_filter = token[4:].strip().lower()
+            elif lower.startswith("id:") and len(token) > 3:
+                id_filter = token[3:].strip().lower()
+            else:
+                terms.append(token)
+        return " ".join(terms).strip(), src_filter, id_filter
+
+    @staticmethod
+    def _filter_sources_for_migrate(src_filter: str, id_filter: str):
+        sources = get_registry().get_all()
+        if id_filter:
+            sources = [ext for ext in sources if ext.id.lower() == id_filter]
+        if src_filter:
+            sources = [
+                ext for ext in sources
+                if src_filter in ext.name.lower() or src_filter in ext.id.lower()
+            ]
+        return sources
 
     def _load_extensions(self):
         """Populate the built-in and JVM extension lists."""
         registry = get_registry()
 
-        # Clear built-in list
-        child = self._builtin_list.get_first_child()
-        while child:
-            nxt = child.get_next_sibling()
-            self._builtin_list.remove(child)
-            child = nxt
-
-        # Clear JVM list
-        child = self._jvm_list.get_first_child()
-        while child:
-            nxt = child.get_next_sibling()
-            self._jvm_list.remove(child)
-            child = nxt
+        self._clear_list(self._builtin_list)
+        self._clear_list(self._jvm_list)
 
         has_jvm = False
         for ext in registry.get_all():
@@ -220,7 +769,7 @@ class BrowseView(Gtk.Box):
 
         if not has_jvm:
             self._jvm_empty = Adw.ActionRow(title="No extensions installed")
-            self._jvm_empty.set_subtitle("Use 'Install from file' above to add Tachiyomi APK extensions")
+            self._jvm_empty.set_subtitle("Browse the catalog below or install an APK from file")
             self._jvm_list.append(self._jvm_empty)
 
     def _add_builtin_extension_row(self, ext):
@@ -285,7 +834,7 @@ class BrowseView(Gtk.Box):
                 self._install_apk(apk_path)
         except Exception as e:
             if "Dismissed" not in str(e):
-                print(f"[browse] File dialog error: {e}")
+                logger.error("file dialog error: %s", e)
 
     def _install_apk(self, apk_path: str):
         """Install an APK extension in a background thread."""
@@ -322,7 +871,8 @@ class BrowseView(Gtk.Box):
                 window.get_content().add_toast(toast)
             except Exception:
                 pass
-        print(f"[browse] Installed extensions: {', '.join(names)}")
+        logger.info("installed extensions: %s", ", ".join(names))
+        notify(self, f"Installed: {', '.join(names)}")
 
     def _on_install_error(self, message):
         window = self.get_root()
@@ -333,10 +883,17 @@ class BrowseView(Gtk.Box):
                 window.get_content().add_toast(toast)
             except Exception:
                 pass
-        print(f"[browse] Install error: {message}")
+        logger.error("install error: %s", message)
+        notify_error(self, f"Extension install failed: {message}")
 
     def _on_uninstall(self, extension_id: str):
-        """Uninstall a JVM extension."""
+        """
+        Uninstall a JVM extension.
+
+        Unregistering alone only dropped it from the in-memory registry, so the
+        JAR and its metadata survived and the extension reappeared on the next
+        launch. Remove the installed files too.
+        """
         registry = get_registry()
         removed = False
         try:
@@ -349,12 +906,14 @@ class BrowseView(Gtk.Box):
                     if ext.info.id.startswith("jvm_") and manager.get_proxy(ext.info.id) is None:
                         registry.unregister(ext.info.id)
         except Exception as e:
-            print(f"[browse] Uninstall error: {e}")
+            logger.error("uninstall error: %s", e)
 
         if not removed:
             registry.unregister(extension_id)
         self._load_extensions()
         self._load_sources()
+        if getattr(self, "_repo_entries", None):
+            self._render_available()
 
 
 class SourceCatalogView(Gtk.Box):
@@ -375,6 +934,11 @@ class SourceCatalogView(Gtk.Box):
         self._current_mode = "popular"  # popular | latest | search
         self._search_query = ""
         self._manga_list = []
+        # Source-defined filters: the FilterList spec as returned by the source,
+        # and the state the user last applied to it.
+        self._source_filters = None
+        self._filter_state = []
+        self._filters_loading = False
 
         self._build_ui()
         self._load_page(1)
@@ -390,6 +954,13 @@ class SourceCatalogView(Gtk.Box):
         back_btn.set_tooltip_text("Back")
         back_btn.connect("clicked", lambda *_: self._on_back() if self._on_back else None)
         header.pack_start(back_btn)
+
+        # A label rather than an icon: Adwaita ships no funnel/filter symbolic,
+        # so an icon button would render blank on a stock theme.
+        self._filter_btn = Gtk.Button(label="Filters")
+        self._filter_btn.set_tooltip_text("Filters")
+        self._filter_btn.connect("clicked", self._on_filters_clicked)
+        header.pack_end(self._filter_btn)
 
         self.append(header)
 
@@ -498,14 +1069,79 @@ class SourceCatalogView(Gtk.Box):
         is_search = (mode == "search")
         self._search_revealer.set_reveal_child(is_search)
         if not is_search:
+            # Popular/Latest take no filters, so drop the applied state rather
+            # than have the button claim filters are active while they are not.
+            if self._filter_state:
+                self._filter_state = []
+                self._filter_btn.remove_css_class("suggested-action")
+                self._filter_btn.set_tooltip_text("Filters")
             self._manga_list = []
             self._load_page(1)
 
     def _on_search_activate(self, *_):
         self._search_query = self._search_entry.get_text().strip()
-        if self._search_query:
+        if self._search_query or self._filter_state:
             self._manga_list = []
             self._load_page(1)
+
+    # ── Source-defined filters ────────────────────────────────────────────
+
+    def _on_filters_clicked(self, *_):
+        if self._filters_loading:
+            return
+
+        if self._source_filters is not None:
+            self._show_filter_dialog()
+            return
+
+        self._filters_loading = True
+        self._filter_btn.set_sensitive(False)
+        ext = self._extension
+
+        def fetch():
+            try:
+                filters = ext.get_filters() or []
+            except Exception as e:
+                logger.error("get_filters failed for %s: %s", ext.name, e)
+                filters = []
+            GLib.idle_add(self._on_filters_loaded, filters)
+
+        threading.Thread(target=fetch, daemon=True).start()
+
+    def _on_filters_loaded(self, filters):
+        self._filters_loading = False
+        self._filter_btn.set_sensitive(True)
+        self._source_filters = filters
+        self._show_filter_dialog()
+
+    def _show_filter_dialog(self):
+        if not self._source_filters:
+            self._filter_btn.set_tooltip_text("This source has no filters")
+            return
+
+        dialog = FilterDialog(
+            parent=self.get_root(),
+            source_name=self._extension.name,
+            filters=self._source_filters,
+            on_apply=self._on_filters_applied,
+        )
+        dialog.present()
+
+    def _on_filters_applied(self, state):
+        self._filter_state = state or []
+
+        # Reflect that filters are active so the user can find their way back.
+        if self._filter_state:
+            self._filter_btn.add_css_class("suggested-action")
+            self._filter_btn.set_tooltip_text("Filters (active)")
+            self._search_btn.set_active(True)
+            self._search_revealer.set_reveal_child(True)
+        else:
+            self._filter_btn.remove_css_class("suggested-action")
+            self._filter_btn.set_tooltip_text("Filters")
+
+        self._manga_list = []
+        self._load_page(1)
 
     def _load_page(self, page: int):
         self._current_page = page
@@ -515,6 +1151,12 @@ class SourceCatalogView(Gtk.Box):
         ext = self._extension
         mode = self._current_mode
         query = self._search_query
+        filter_state = list(self._filter_state)
+
+        # Applied filters always go through search, matching Android: Popular
+        # and Latest have no filter parameter on the source API.
+        if filter_state:
+            mode = "search"
 
         def fetch():
             try:
@@ -523,7 +1165,7 @@ class SourceCatalogView(Gtk.Box):
                 elif mode == "latest":
                     results, has_next = ext.get_latest(page)
                 else:
-                    f = SearchFilter(query=query)
+                    f = SearchFilter(query=query, source_filters=filter_state)
                     results, has_next = ext.search(f, page)
                 GLib.idle_add(self._on_results, results, has_next, page)
             except Exception as e:
@@ -554,7 +1196,13 @@ class SourceCatalogView(Gtk.Box):
         self._load_more_btn.set_label("Load More")
         self._load_more_btn.set_sensitive(True)
         self._stack.set_visible_child_name("empty")
-        print(f"[source_catalog] Error: {message}")
+        self._empty.set_title("Could not reach this source")
+        logger.error("source catalog error: %s", message)
+        notify_retry(
+            self,
+            f"{self._extension.name}: {message}",
+            lambda: self._load_page(self._current_page),
+        )
 
     def _load_more(self, *_):
         if self._loading_more or not self._has_next:

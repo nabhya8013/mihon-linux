@@ -1,0 +1,80 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>io.github.nabhya8013.MihonLinux</id>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>MIT</project_license>
+
+  <name>Mihon for Linux</name>
+  <summary>Read and manage manga from online sources</summary>
+
+  <description>
+    <p>
+      Mihon for Linux is a native GTK4 manga reader for the desktop. It keeps a
+      library with categories, tracks what you have read, downloads chapters for
+      offline reading, and browses online sources.
+    </p>
+    <p>
+      It loads unmodified Tachiyomi and Mihon extension APKs through a Kotlin
+      bridge process, so the sources you already use keep working. Backups move
+      in both directions with Mihon on Android through the .tachibk format.
+    </p>
+    <p>Features:</p>
+    <ul>
+      <li>Library with categories, per-category sorting and filters, and batch actions</li>
+      <li>Paged and continuous webtoon reading, with two-page spread detection</li>
+      <li>Global search across every installed source at once</li>
+      <li>Chapter downloads for offline reading</li>
+      <li>Import and export Mihon Android backups</li>
+    </ul>
+    <p>
+      This is an independent project. It is not affiliated with or endorsed by
+      the Mihon or Tachiyomi projects, and it does not host or distribute any
+      manga content.
+    </p>
+  </description>
+
+  <launchable type="desktop-id">io.github.nabhya8013.MihonLinux.desktop</launchable>
+
+  <categories>
+    <category>Graphics</category>
+    <category>Viewer</category>
+    <category>Network</category>
+  </categories>
+
+  <keywords>
+    <keyword>manga</keyword>
+    <keyword>comic</keyword>
+    <keyword>webtoon</keyword>
+    <keyword>reader</keyword>
+  </keywords>
+
+  <content_rating type="oars-1.1">
+    <content_attribute id="violence-cartoon">moderate</content_attribute>
+    <content_attribute id="sex-themes">moderate</content_attribute>
+    <content_attribute id="social-info">mild</content_attribute>
+  </content_rating>
+
+  <requires>
+    <display_length compare="ge">360</display_length>
+  </requires>
+
+  <recommends>
+    <control>keyboard</control>
+    <control>pointing</control>
+  </recommends>
+
+  <url type="homepage">https://github.com/nabhya8013/mihon-linux</url>
+  <url type="bugtracker">https://github.com/nabhya8013/mihon-linux/issues</url>
+
+  <developer id="io.github.nabhya8013">
+    <name>nabhya8013</name>
+  </developer>
+
+  <releases>
+    <release version="1.0.0" date="2026-09-10">
+      <description>
+        <p>Source filters, backup export, reader page prefetching and concurrent global search.</p>
+      </description>
+    </release>
+  </releases>
+</component>
