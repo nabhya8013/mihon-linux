@@ -13,12 +13,45 @@ from .core.logging_setup import configure_logging
 from .ui.main_window import MainWindow
 from .ui.styles import CSS
 from .ui.theme import apply_appearance_theme
+from .ui.notify import notify_desktop_for_app
 
 logger = logging.getLogger("app")
 
 # Must match data/<APP_ID>.desktop, its metainfo file, and the installed icon
 # name, or the shell cannot tie a running window to its launcher entry.
 APP_ID = "io.github.nabhya8013.MihonLinux"
+
+
+def sync_tracking_queue(app):
+    """
+    Deliver tracker updates that failed while the app was last running.
+
+    Called before any window exists (app.py's startup hook fires ahead of
+    "activate"), so there's nothing to show a toast on - a desktop
+    notification is the only way this ever reaches the user. Split out from
+    _on_startup as a module-level function so the notify-or-not decision is
+    testable without a running GTK application.
+    """
+    from .core.tracking import get_track_manager
+
+    manager = get_track_manager()
+    pending_before = manager.queue.count()
+    if not pending_before:
+        return
+
+    delivered = manager.process_queue()
+    remaining = manager.queue.count()
+    if delivered:
+        body = f"Delivered {delivered} queued update{'s' if delivered != 1 else ''}"
+        if remaining:
+            body += f"; {remaining} still waiting"
+        notify_desktop_for_app(app, "Tracker sync", body, notification_id="tracking-queue")
+    elif remaining:
+        notify_desktop_for_app(
+            app, "Tracker sync failed",
+            f"{remaining} update{'s' if remaining != 1 else ''} still waiting to send",
+            notification_id="tracking-queue",
+        )
 
 
 class MihonApp(Adw.Application):
@@ -57,16 +90,15 @@ class MihonApp(Adw.Application):
         except Exception as exc:  # pragma: no cover - best effort
             logger.warning("Could not prune the page cache: %s", exc)
 
-        # Deliver tracker updates that failed while the app was last running.
-        # A sync fires exactly when the network is least reliable, so the queue
-        # is normally non-empty after an offline session.
-        try:
-            from .core.tracking import get_track_manager
-            threading.Thread(
-                target=lambda: get_track_manager().process_queue(), daemon=True
-            ).start()
-        except Exception as exc:  # pragma: no cover - best effort
-            logger.warning("Could not drain the tracking queue: %s", exc)
+        # A sync fires exactly when the network is least reliable, so the
+        # queue is normally non-empty after an offline session.
+        def run_tracking_sync():
+            try:
+                sync_tracking_queue(app)
+            except Exception as exc:
+                logger.warning("Could not drain the tracking queue: %s", exc)
+
+        threading.Thread(target=run_tracking_sync, daemon=True).start()
 
         # Start the JVM ↔ Python challenge handshake watcher so that
         # Cloudflare blocks raised inside bridge OkHttp requests can

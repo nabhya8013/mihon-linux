@@ -118,11 +118,26 @@ def notify_desktop(
     no-ops when there's no running Adw.Application to send through — a unit
     test, or a widget not yet attached to a window — same as notify().
     """
-    if get_db().get_setting("desktop_notifications_enabled", "1") != "1":
-        return False
-
     root = widget.get_root() if hasattr(widget, "get_root") else None
     app = root.get_application() if root is not None and hasattr(root, "get_application") else None
+    return notify_desktop_for_app(app, title, body, notification_id=notification_id)
+
+
+def notify_desktop_for_app(
+    app,
+    title: str,
+    body: str = "",
+    *,
+    notification_id: Optional[str] = None,
+) -> bool:
+    """
+    Same as :func:`notify_desktop`, but takes a ``Gio.Application`` directly
+    instead of finding one from a widget. For call sites that run before any
+    window exists — app.py's startup hook, which drains the tracking retry
+    queue before ``MainWindow`` is built.
+    """
+    if get_db().get_setting("desktop_notifications_enabled", "1") != "1":
+        return False
     if app is None:
         logger.info("desktop notification dropped (no application): %s", title)
         return False
@@ -140,6 +155,7 @@ __all__ = [
     "find_toast_overlay",
     "notify",
     "notify_desktop",
+    "notify_desktop_for_app",
     "notify_error",
     "notify_retry",
 ]
