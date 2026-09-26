@@ -18,7 +18,9 @@ from typing import Callable, Optional
 import gi
 gi.require_version("Gtk", "4.0")
 gi.require_version("Adw", "1")
-from gi.repository import Adw, Gtk
+from gi.repository import Adw, Gtk, Gio
+
+from ..core.database import get_db
 
 logger = logging.getLogger("notify")
 
@@ -98,11 +100,46 @@ def notify_retry(widget, message: str, on_retry: Callable) -> bool:
     return notify_error(widget, message, action_label="Retry", on_action=on_retry)
 
 
+def notify_desktop(
+    widget,
+    title: str,
+    body: str = "",
+    *,
+    notification_id: Optional[str] = None,
+) -> bool:
+    """
+    Send an OS-level desktop notification for events worth seeing even when
+    the window isn't focused — a background library update, a finished
+    download. A toast only shows while the window is open and visible; this
+    reaches the user through the desktop shell instead.
+
+    ``notification_id`` lets a later call replace an earlier one (e.g. one
+    "library-update" id per run) instead of stacking duplicates. Silently
+    no-ops when there's no running Adw.Application to send through — a unit
+    test, or a widget not yet attached to a window — same as notify().
+    """
+    if get_db().get_setting("desktop_notifications_enabled", "1") != "1":
+        return False
+
+    root = widget.get_root() if hasattr(widget, "get_root") else None
+    app = root.get_application() if root is not None and hasattr(root, "get_application") else None
+    if app is None:
+        logger.info("desktop notification dropped (no application): %s", title)
+        return False
+
+    notification = Gio.Notification.new(title)
+    if body:
+        notification.set_body(body)
+    app.send_notification(notification_id, notification)
+    return True
+
+
 __all__ = [
     "ERROR_TIMEOUT",
     "INFO_TIMEOUT",
     "find_toast_overlay",
     "notify",
+    "notify_desktop",
     "notify_error",
     "notify_retry",
 ]

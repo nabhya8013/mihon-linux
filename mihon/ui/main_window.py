@@ -20,7 +20,7 @@ from .challenge_solver import WebKitCookieSolver
 from ..core.database import get_db, DOWNLOADS_DIR
 from ..core.tracking import get_track_manager
 from ..extensions.repo_manager import get_repo_manager
-from .notify import notify, notify_error
+from .notify import notify, notify_error, notify_desktop
 import logging
 
 logger = logging.getLogger("main_window")
@@ -39,6 +39,10 @@ class MainWindow(Adw.ApplicationWindow):
         self._setup_shortcuts()
         self._challenge_solver = WebKitCookieSolver(self)
         set_challenge_solver(self._challenge_solver.solve)
+
+        from ..core.downloader import get_download_manager
+        get_download_manager().on_status(self._on_download_status_changed)
+
         GLib.idle_add(self._run_startup_tasks)
 
     def _build_ui(self):
@@ -444,6 +448,14 @@ class MainWindow(Adw.ApplicationWindow):
         unread_row.connect("notify::active", self._on_show_unread_badge_toggled)
         lib_group.add(unread_row)
 
+        desktop_notif_row = Adw.SwitchRow(
+            title="Desktop notifications",
+            subtitle="Background update results and download completion, even while minimized",
+        )
+        desktop_notif_row.set_active(get_db().get_setting("desktop_notifications_enabled", "1") == "1")
+        desktop_notif_row.connect("notify::active", self._on_desktop_notifications_toggled)
+        lib_group.add(desktop_notif_row)
+
         # Data group: backup / restore
         data_group = Adw.PreferencesGroup(
             title="Data",
@@ -620,6 +632,10 @@ class MainWindow(Adw.ApplicationWindow):
         get_db().set_setting("show_unread_badge", value)
         self._library_view.reload()
 
+    def _on_desktop_notifications_toggled(self, row, _pspec):
+        value = "1" if row.get_active() else "0"
+        get_db().set_setting("desktop_notifications_enabled", value)
+
     def _on_choose_download_dir(self, button):
         dialog = Gtk.FileDialog()
         dialog.set_title("Choose the download folder")
@@ -754,6 +770,31 @@ class MainWindow(Adw.ApplicationWindow):
         from ..core.downloader import get_download_manager
         get_download_manager().remove(chapter_id)
         self._refresh_downloads()
+
+    def _on_download_status_changed(self, chapter_id: int, status):
+        # Fires from a worker thread; GTK/Gio calls must happen on the main loop.
+        GLib.idle_add(self._notify_download_status, chapter_id, status)
+
+    def _notify_download_status(self, chapter_id: int, status) -> bool:
+        if status not in (DownloadStatus.DOWNLOADED, DownloadStatus.ERROR):
+            return False
+
+        from ..core.downloader import get_download_manager
+        item = get_download_manager().get_item(chapter_id)
+        if item is None:
+            return False
+
+        label = f"{item.manga.title} – Ch.{item.chapter.chapter_number:g}"
+        notification_id = f"download-{chapter_id}"
+        if status == DownloadStatus.DOWNLOADED:
+            notify_desktop(self, "Download complete", label, notification_id=notification_id)
+        else:
+            notify_desktop(
+                self, "Download failed",
+                f"{label}: {item.error_message or 'unknown error'}",
+                notification_id=notification_id,
+            )
+        return False
 
     # ── Local source ──────────────────────────────────────────────────────
 

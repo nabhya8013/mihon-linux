@@ -11,6 +11,7 @@ import time
 from ..core.database import get_db
 from ..core.library_updater import LibraryUpdater, LibraryUpdateSummary
 from .widgets import EmptyState, LoadingSpinner
+from .notify import notify_desktop
 
 
 class UpdatesView(Gtk.Box):
@@ -143,17 +144,20 @@ class UpdatesView(Gtk.Box):
         # below always checks the full library on demand.
         if not self._checking:
             skip_dropped = self._db.get_setting("smart_update_skip_dropped", "1") == "1"
-            self._start_update_check(skip_dropped=skip_dropped)
+            # A silent background run is exactly the case a desktop
+            # notification is for - the user isn't watching this tab.
+            self._start_update_check(skip_dropped=skip_dropped, desktop_notify=True)
         return True  # keep firing on this interval
 
     def _on_check_updates_clicked(self, *_):
         self._start_update_check()
 
-    def _start_update_check(self, skip_dropped: bool = False):
+    def _start_update_check(self, skip_dropped: bool = False, desktop_notify: bool = False):
         if self._checking:
             return
 
         self._checking = True
+        self._pending_desktop_notify = desktop_notify
         self._check_btn.set_sensitive(False)
         self._spinner.set_visible(True)
         self._spinner.start()
@@ -195,6 +199,19 @@ class UpdatesView(Gtk.Box):
         else:
             # Still show cached unread as fallback after a check.
             self.refresh_cached()
+
+        if getattr(self, "_pending_desktop_notify", False) and summary.updated_manga:
+            titles = ", ".join(r.manga.title for r in summary.results[:3])
+            if summary.updated_manga > 3:
+                titles += f", +{summary.updated_manga - 3} more"
+            notify_desktop(
+                self,
+                f"{summary.new_chapters} new chapter"
+                f"{'s' if summary.new_chapters != 1 else ''}",
+                titles,
+                notification_id="library-update",
+            )
+        self._pending_desktop_notify = False
 
     def _render_cached_unread(self, unread_manga):
         if self._checking:

@@ -322,6 +322,7 @@ class Database:
             "show_unread_badge": "1",
             "library_update_interval_hours": "12",
             "smart_update_skip_dropped": "1",
+            "desktop_notifications_enabled": "1",
             "reader_tap_invert": "0",
             "reader_fullscreen": "0",
             "reader_keep_screen_on": "0",

@@ -1,5 +1,6 @@
-"""Tests for toast-based error surfacing."""
+"""Tests for toast-based and desktop notification surfacing."""
 import unittest
+from unittest.mock import patch
 
 import gi
 gi.require_version("Gtk", "4.0")
@@ -9,7 +10,47 @@ from gi.repository import Adw, Gtk
 Gtk.init_check()
 Adw.init()
 
-from mihon.ui.notify import find_toast_overlay, notify, notify_error, notify_retry
+from mihon.ui.notify import (
+    find_toast_overlay,
+    notify,
+    notify_desktop,
+    notify_error,
+    notify_retry,
+)
+
+
+class _FakeApp:
+    def __init__(self):
+        self.sent = []
+
+    def send_notification(self, notification_id, notification):
+        self.sent.append((notification_id, notification))
+
+
+class _FakeRoot:
+    def __init__(self, app):
+        self._app = app
+
+    def get_application(self):
+        return self._app
+
+
+class _FakeWidget:
+    def __init__(self, root):
+        self._root = root
+
+    def get_root(self):
+        return self._root
+
+
+class _FakeSettingsDB:
+    def __init__(self, enabled=True):
+        self._enabled = "1" if enabled else "0"
+
+    def get_setting(self, key, default=""):
+        if key == "desktop_notifications_enabled":
+            return self._enabled
+        return default
 
 
 class NotifyTests(unittest.TestCase):
@@ -64,6 +105,34 @@ class NotifyTests(unittest.TestCase):
         # A widget built in a test, or before it is added to a window.
         notify(Gtk.Label(), "orphaned")
         notify_error(None, "no widget at all")
+
+
+class NotifyDesktopTests(unittest.TestCase):
+
+    def test_sent_when_an_application_is_reachable(self):
+        app = _FakeApp()
+        widget = _FakeWidget(_FakeRoot(app))
+        with patch("mihon.ui.notify.get_db", return_value=_FakeSettingsDB()):
+            self.assertTrue(notify_desktop(widget, "Title", "Body", notification_id="x"))
+        self.assertEqual(len(app.sent), 1)
+        self.assertEqual(app.sent[0][0], "x")
+
+    def test_no_application_logs_and_returns_false(self):
+        with patch("mihon.ui.notify.get_db", return_value=_FakeSettingsDB()):
+            with self.assertLogs("notify", level="INFO"):
+                self.assertFalse(notify_desktop(Gtk.Box(), "Title"))
+
+    def test_disabled_by_setting_sends_nothing(self):
+        app = _FakeApp()
+        widget = _FakeWidget(_FakeRoot(app))
+        with patch("mihon.ui.notify.get_db", return_value=_FakeSettingsDB(enabled=False)):
+            self.assertFalse(notify_desktop(widget, "Title"))
+        self.assertEqual(app.sent, [])
+
+    def test_never_raises_without_a_window(self):
+        with patch("mihon.ui.notify.get_db", return_value=_FakeSettingsDB()):
+            notify_desktop(Gtk.Label(), "orphaned")
+            notify_desktop(None, "no widget at all")
 
 
 if __name__ == "__main__":
