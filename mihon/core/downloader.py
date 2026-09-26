@@ -4,7 +4,6 @@ Queue-based, threaded chapter downloader with progress tracking.
 """
 import os
 import threading
-import queue
 import time
 from urllib.parse import urlparse
 from pathlib import Path
@@ -46,9 +45,13 @@ class DownloadManager:
     DEFAULT_MAX_WORKERS = 2
 
     def __init__(self):
-        self._queue: queue.Queue = queue.Queue()
+        # Pending chapter ids in dispatch order; a worker pops from the front.
+        # Reordering (move_up/move_down/prioritize) only touches this list,
+        # so it's plain and index-addressable rather than a queue.Queue.
+        self._pending: List[int] = []
+        self._pending_pages: Dict[int, List[Page]] = {}
         self._active: Dict[int, DownloadItem] = {}   # chapter_id -> item
-        self._lock = threading.Lock()
+        self._lock = threading.Condition()
         self._workers: List[threading.Thread] = []
         self._running = True
         self._on_progress_cb: Optional[Callable] = None
@@ -86,8 +89,10 @@ class DownloadManager:
         )
         with self._lock:
             self._active[chapter.id] = item
+            self._pending_pages[chapter.id] = pages
+            self._pending.append(chapter.id)
+            self._lock.notify()
         get_db().update_download_status(chapter.id, DownloadStatus.QUEUED)
-        self._queue.put((item, pages))
         if self._on_status_cb:
             self._on_status_cb(chapter.id, DownloadStatus.QUEUED)
         return item
@@ -131,14 +136,56 @@ class DownloadManager:
         with self._lock:
             return list(self._active.values())
 
-    def _worker(self):
-        while self._running:
+    def move_to_front(self, chapter_id: int) -> bool:
+        """Prioritize a still-pending (not yet downloading) chapter."""
+        with self._lock:
+            if chapter_id not in self._pending or self._pending[0] == chapter_id:
+                return False
+            self._pending.remove(chapter_id)
+            self._pending.insert(0, chapter_id)
+            return True
+
+    def move_up(self, chapter_id: int) -> bool:
+        return self._shift(chapter_id, -1)
+
+    def move_down(self, chapter_id: int) -> bool:
+        return self._shift(chapter_id, 1)
+
+    def _shift(self, chapter_id: int, delta: int) -> bool:
+        with self._lock:
             try:
-                item, pages = self._queue.get(timeout=1)
-            except queue.Empty:
+                idx = self._pending.index(chapter_id)
+            except ValueError:
+                return False
+            new_idx = idx + delta
+            if not (0 <= new_idx < len(self._pending)):
+                return False
+            self._pending[idx], self._pending[new_idx] = (
+                self._pending[new_idx], self._pending[idx],
+            )
+            return True
+
+    def pending_order(self) -> List[int]:
+        """Chapter ids not yet started, front (next) to back."""
+        with self._lock:
+            return list(self._pending)
+
+    def _worker(self):
+        while True:
+            with self._lock:
+                while self._running and not self._pending:
+                    self._lock.wait(timeout=1)
+                if not self._running:
+                    return
+                if not self._pending:
+                    continue
+                chapter_id = self._pending.pop(0)
+                item = self._active.get(chapter_id)
+                pages = self._pending_pages.pop(chapter_id, None)
+
+            if item is None or pages is None:
                 continue
             self._download_chapter(item, pages)
-            self._queue.task_done()
 
     def _download_chapter(self, item: DownloadItem, pages: List[Page]):
         chapter = item.chapter
@@ -244,7 +291,9 @@ class DownloadManager:
         return ".jpg"
 
     def shutdown(self):
-        self._running = False
+        with self._lock:
+            self._running = False
+            self._lock.notify_all()
 
 
 # Singleton

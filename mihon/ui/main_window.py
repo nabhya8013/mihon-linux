@@ -694,6 +694,8 @@ class MainWindow(Adw.ApplicationWindow):
             self._downloads_list.append(row)
             return
 
+        pending_order = dm.pending_order()
+
         for item in items:
             row = Gtk.ListBoxRow()
             row.set_activatable(False)
@@ -713,6 +715,30 @@ class MainWindow(Adw.ApplicationWindow):
             header.append(title)
 
             chapter_id = item.chapter.id
+            if item.status == DownloadStatus.QUEUED and chapter_id in pending_order:
+                position = pending_order.index(chapter_id)
+
+                up_btn = Gtk.Button(icon_name="go-up-symbolic")
+                up_btn.add_css_class("flat")
+                up_btn.set_tooltip_text("Move up")
+                up_btn.set_sensitive(position > 0)
+                up_btn.connect("clicked", self._on_move_download_up, chapter_id)
+                header.append(up_btn)
+
+                down_btn = Gtk.Button(icon_name="go-down-symbolic")
+                down_btn.add_css_class("flat")
+                down_btn.set_tooltip_text("Move down")
+                down_btn.set_sensitive(position < len(pending_order) - 1)
+                down_btn.connect("clicked", self._on_move_download_down, chapter_id)
+                header.append(down_btn)
+
+                if position > 0:
+                    top_btn = Gtk.Button(label="Prioritize")
+                    top_btn.add_css_class("flat")
+                    top_btn.set_tooltip_text("Download this one next")
+                    top_btn.connect("clicked", self._on_prioritize_download, chapter_id)
+                    header.append(top_btn)
+
             if item.status in (DownloadStatus.QUEUED, DownloadStatus.DOWNLOADING):
                 cancel_btn = Gtk.Button(label="Cancel")
                 cancel_btn.add_css_class("flat")
@@ -755,6 +781,21 @@ class MainWindow(Adw.ApplicationWindow):
 
             row.set_child(box)
             self._downloads_list.append(row)
+
+    def _on_move_download_up(self, _button, chapter_id: int):
+        from ..core.downloader import get_download_manager
+        get_download_manager().move_up(chapter_id)
+        self._refresh_downloads()
+
+    def _on_move_download_down(self, _button, chapter_id: int):
+        from ..core.downloader import get_download_manager
+        get_download_manager().move_down(chapter_id)
+        self._refresh_downloads()
+
+    def _on_prioritize_download(self, _button, chapter_id: int):
+        from ..core.downloader import get_download_manager
+        get_download_manager().move_to_front(chapter_id)
+        self._refresh_downloads()
 
     def _on_cancel_download(self, _button, chapter_id: int):
         from ..core.downloader import get_download_manager
