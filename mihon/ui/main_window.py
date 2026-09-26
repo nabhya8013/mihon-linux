@@ -323,6 +323,19 @@ class MainWindow(Adw.ApplicationWindow):
 
     # ── More (Settings & Downloads) view ───────────────────────────────────
 
+    # One compact scrolling panel used to grow unmanageable (9 preference
+    # groups stacked in a single page). It's now a list of sections that
+    # push a dedicated page onto the same nav stack manga detail/browse use.
+    _SETTINGS_SECTIONS = [
+        ("Reader", "Direction, layout, background", "view-paged-symbolic", "_build_reader_settings_page"),
+        ("Appearance", "Theme", "applications-graphics-symbolic", "_build_appearance_settings_page"),
+        ("Library", "Updates, badges, notifications", "library-symbolic", "_build_library_settings_page"),
+        ("Downloads and Data", "Queue, location, backup", "folder-download-symbolic", "_build_downloads_settings_page"),
+        ("Sources", "Local library, extension repositories", "find-location-symbolic", "_build_sources_settings_page"),
+        ("Tracking", "AniList, MyAnimeList", "network-transmit-receive-symbolic", "_build_tracking_settings_page"),
+        ("About", "Version", "help-about-symbolic", "_build_about_settings_page"),
+    ]
+
     def _build_more_view(self) -> Gtk.Box:
         box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=0)
 
@@ -337,6 +350,64 @@ class MainWindow(Adw.ApplicationWindow):
         content.set_hexpand(True)
         content.set_halign(Gtk.Align.FILL)
 
+        settings_group = Adw.PreferencesGroup(title="Settings")
+        content.append(settings_group)
+
+        # Built eagerly (not on first visit) so every self._xxx widget these
+        # pages create keeps existing the moment the window opens - refresh
+        # methods elsewhere (_refresh_downloads, _refresh_local_dir_row, the
+        # tracking queue label, ...) already assume that and fire off the
+        # "more" tab alone, before any specific section has been opened.
+        self._settings_pages = {}
+        for title, subtitle, icon_name, builder_name in self._SETTINGS_SECTIONS:
+            self._settings_pages[title] = self._build_settings_page(title, builder_name)
+
+            row = Adw.ActionRow(title=title, subtitle=subtitle)
+            row.add_prefix(Gtk.Image.new_from_icon_name(icon_name))
+            arrow = Gtk.Image.new_from_icon_name("go-next-symbolic")
+            arrow.add_css_class("dim-label")
+            row.add_suffix(arrow)
+            row.set_activatable(True)
+            row.connect("activated", self._on_settings_section_activated, title)
+            settings_group.add(row)
+
+        scroll.set_child(content)
+        box.append(scroll)
+        return box
+
+    def _build_settings_page(self, title: str, builder_name: str) -> Adw.NavigationPage:
+        section_content = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=16)
+        section_content.set_margin_start(32)
+        section_content.set_margin_end(32)
+        section_content.set_margin_top(16)
+        section_content.set_margin_bottom(16)
+        section_content.set_hexpand(True)
+        section_content.set_halign(Gtk.Align.FILL)
+        getattr(self, builder_name)(section_content)
+
+        scroll = Gtk.ScrolledWindow()
+        scroll.set_vexpand(True)
+        scroll.set_child(section_content)
+
+        header = Adw.HeaderBar()
+        header.set_show_end_title_buttons(True)
+        header.set_show_start_title_buttons(False)
+        header.set_title_widget(Adw.WindowTitle(title=title))
+        back_btn = Gtk.Button(icon_name="go-previous-symbolic")
+        back_btn.set_tooltip_text("Back")
+        back_btn.connect("clicked", lambda *_: self._nav_view.pop())
+        header.pack_start(back_btn)
+
+        page_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=0)
+        page_box.append(header)
+        page_box.append(scroll)
+
+        return Adw.NavigationPage.new(page_box, title)
+
+    def _on_settings_section_activated(self, _row, title: str):
+        self._nav_view.push(self._settings_pages[title])
+
+    def _build_downloads_settings_page(self, content):
         # Downloads group
         dl_group = Adw.PreferencesGroup(title="Downloads")
         content.append(dl_group)
@@ -367,6 +438,54 @@ class MainWindow(Adw.ApplicationWindow):
         max_dl_row.connect("notify::value", self._on_max_downloads_changed)
         dl_group.add(max_dl_row)
 
+        # Data group: backup / restore
+        data_group = Adw.PreferencesGroup(
+            title="Data",
+            description="Move your library between this app and Mihon on Android.",
+        )
+        content.append(data_group)
+
+        import_row = Adw.ActionRow(
+            title="Import .tachibk backup",
+            subtitle="Restore your library, categories, and chapter metadata from an Android Mihon backup file.",
+        )
+        import_btn = Gtk.Button(label="Choose File…")
+        import_btn.add_css_class("suggested-action")
+        import_btn.set_valign(Gtk.Align.CENTER)
+        import_btn.connect("clicked", self._on_import_tachibk_clicked)
+        import_row.add_suffix(import_btn)
+        import_row.set_activatable_widget(import_btn)
+        data_group.add(import_row)
+
+        export_row = Adw.ActionRow(
+            title="Export .tachibk backup",
+            subtitle="Write your library, categories, and chapter progress to a file Android Mihon can restore.",
+        )
+        export_btn = Gtk.Button(label="Save As…")
+        export_btn.set_valign(Gtk.Align.CENTER)
+        export_btn.connect("clicked", self._on_export_tachibk_clicked)
+        export_row.add_suffix(export_btn)
+        export_row.set_activatable_widget(export_btn)
+        data_group.add(export_row)
+
+        cache_row = Adw.ActionRow(
+            title="Clear page cache",
+            subtitle="Delete cached chapter images. Covers and downloads are kept.",
+        )
+        self._cache_size_label = Gtk.Label()
+        self._cache_size_label.add_css_class("dim-label")
+        self._cache_size_label.set_valign(Gtk.Align.CENTER)
+        cache_row.add_suffix(self._cache_size_label)
+
+        clear_cache_btn = Gtk.Button(label="Clear")
+        clear_cache_btn.add_css_class("destructive-action")
+        clear_cache_btn.set_valign(Gtk.Align.CENTER)
+        clear_cache_btn.connect("clicked", self._on_clear_page_cache)
+        cache_row.add_suffix(clear_cache_btn)
+        data_group.add(cache_row)
+        self._refresh_cache_size()
+
+    def _build_reader_settings_page(self, content):
         # Reader settings group
         reader_group = Adw.PreferencesGroup(
             title="Reader",
@@ -411,6 +530,7 @@ class MainWindow(Adw.ApplicationWindow):
         bg_row.connect("notify::selected", self._on_default_background_changed)
         reader_group.add(bg_row)
 
+    def _build_appearance_settings_page(self, content):
         # Appearance group
         appearance_group = Adw.PreferencesGroup(title="Appearance")
         content.append(appearance_group)
@@ -418,13 +538,14 @@ class MainWindow(Adw.ApplicationWindow):
         self._THEME_VALUES = list(theme.THEME_VALUES)
         theme_row = Adw.ComboRow(title="Theme")
         theme_row.set_model(Gtk.StringList.new(["System", "Light", "Dark"]))
-        current_theme = db.get_setting("appearance_theme", "dark")
+        current_theme = get_db().get_setting("appearance_theme", "dark")
         theme_row.set_selected(
             self._THEME_VALUES.index(current_theme) if current_theme in self._THEME_VALUES else 2
         )
         theme_row.connect("notify::selected", self._on_theme_changed)
         appearance_group.add(theme_row)
 
+    def _build_library_settings_page(self, content):
         # Library group
         lib_group = Adw.PreferencesGroup(title="Library")
         content.append(lib_group)
@@ -490,53 +611,7 @@ class MainWindow(Adw.ApplicationWindow):
         desktop_notif_row.connect("notify::active", self._on_desktop_notifications_toggled)
         lib_group.add(desktop_notif_row)
 
-        # Data group: backup / restore
-        data_group = Adw.PreferencesGroup(
-            title="Data",
-            description="Move your library between this app and Mihon on Android.",
-        )
-        content.append(data_group)
-
-        import_row = Adw.ActionRow(
-            title="Import .tachibk backup",
-            subtitle="Restore your library, categories, and chapter metadata from an Android Mihon backup file.",
-        )
-        import_btn = Gtk.Button(label="Choose File…")
-        import_btn.add_css_class("suggested-action")
-        import_btn.set_valign(Gtk.Align.CENTER)
-        import_btn.connect("clicked", self._on_import_tachibk_clicked)
-        import_row.add_suffix(import_btn)
-        import_row.set_activatable_widget(import_btn)
-        data_group.add(import_row)
-
-        export_row = Adw.ActionRow(
-            title="Export .tachibk backup",
-            subtitle="Write your library, categories, and chapter progress to a file Android Mihon can restore.",
-        )
-        export_btn = Gtk.Button(label="Save As…")
-        export_btn.set_valign(Gtk.Align.CENTER)
-        export_btn.connect("clicked", self._on_export_tachibk_clicked)
-        export_row.add_suffix(export_btn)
-        export_row.set_activatable_widget(export_btn)
-        data_group.add(export_row)
-
-        cache_row = Adw.ActionRow(
-            title="Clear page cache",
-            subtitle="Delete cached chapter images. Covers and downloads are kept.",
-        )
-        self._cache_size_label = Gtk.Label()
-        self._cache_size_label.add_css_class("dim-label")
-        self._cache_size_label.set_valign(Gtk.Align.CENTER)
-        cache_row.add_suffix(self._cache_size_label)
-
-        clear_cache_btn = Gtk.Button(label="Clear")
-        clear_cache_btn.add_css_class("destructive-action")
-        clear_cache_btn.set_valign(Gtk.Align.CENTER)
-        clear_cache_btn.connect("clicked", self._on_clear_page_cache)
-        cache_row.add_suffix(clear_cache_btn)
-        data_group.add(cache_row)
-        self._refresh_cache_size()
-
+    def _build_sources_settings_page(self, content):
         # Local source
         local_group = Adw.PreferencesGroup(
             title="Local source",
@@ -587,6 +662,7 @@ class MainWindow(Adw.ApplicationWindow):
         self._add_repo_row = add_repo_row
         self._refresh_repo_rows()
 
+    def _build_tracking_settings_page(self, content):
         # Tracking group: per-service client ID and login
         track_group = Adw.PreferencesGroup(
             title="Tracking",
@@ -632,6 +708,7 @@ class MainWindow(Adw.ApplicationWindow):
         track_group.add(storage_row)
         self._refresh_tracking_queue_label()
 
+    def _build_about_settings_page(self, content):
         # About group
         about_group = Adw.PreferencesGroup(title="About")
         content.append(about_group)
@@ -639,10 +716,6 @@ class MainWindow(Adw.ApplicationWindow):
         about_row = Adw.ActionRow(title="Mihon for Linux")
         about_row.set_subtitle("Version 1.0.0 – Built with GTK4 + Python")
         about_group.add(about_row)
-
-        scroll.set_child(content)
-        box.append(scroll)
-        return box
 
     def _on_auto_update_toggled(self, row, _pspec):
         from ..core.database import get_db
