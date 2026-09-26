@@ -22,6 +22,8 @@ from ..core.database import get_db, DOWNLOADS_DIR
 from ..core.tracking import get_track_manager
 from ..extensions.repo_manager import get_repo_manager
 from .notify import notify, notify_error, notify_desktop
+from . import theme
+from .theme import apply_appearance_theme
 import logging
 
 logger = logging.getLogger("main_window")
@@ -409,6 +411,20 @@ class MainWindow(Adw.ApplicationWindow):
         bg_row.connect("notify::selected", self._on_default_background_changed)
         reader_group.add(bg_row)
 
+        # Appearance group
+        appearance_group = Adw.PreferencesGroup(title="Appearance")
+        content.append(appearance_group)
+
+        self._THEME_VALUES = list(theme.THEME_VALUES)
+        theme_row = Adw.ComboRow(title="Theme")
+        theme_row.set_model(Gtk.StringList.new(["System", "Light", "Dark"]))
+        current_theme = db.get_setting("appearance_theme", "dark")
+        theme_row.set_selected(
+            self._THEME_VALUES.index(current_theme) if current_theme in self._THEME_VALUES else 2
+        )
+        theme_row.connect("notify::selected", self._on_theme_changed)
+        appearance_group.add(theme_row)
+
         # Library group
         lib_group = Adw.PreferencesGroup(title="Library")
         content.append(lib_group)
@@ -703,6 +719,10 @@ class MainWindow(Adw.ApplicationWindow):
 
     def _on_default_background_changed(self, row, _pspec):
         get_db().set_setting("reader_background", self._BG_VALUES[row.get_selected()])
+
+    def _on_theme_changed(self, row, _pspec):
+        get_db().set_setting("appearance_theme", self._THEME_VALUES[row.get_selected()])
+        apply_appearance_theme()
 
     def _refresh_downloads(self):
         from ..core.downloader import get_download_manager

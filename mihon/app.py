@@ -12,6 +12,7 @@ import logging
 from .core.logging_setup import configure_logging
 from .ui.main_window import MainWindow
 from .ui.styles import CSS
+from .ui.theme import apply_appearance_theme
 
 logger = logging.getLogger("app")
 
@@ -80,6 +81,7 @@ class MihonApp(Adw.Application):
         # Lets the shell match the window to the installed .desktop entry and
         # draw the right icon.
         Gtk.Window.set_default_icon_name(APP_ID)
+        apply_appearance_theme()
         try:
             win = MainWindow(app=self)
             provider = Gtk.CssProvider()
@@ -93,10 +95,6 @@ class MihonApp(Adw.Application):
             logger.error("Failed to initialize GTK window: %s", e)
             self.quit()
             return
-
-        # Set dark style preference by default
-        style_mgr = Adw.StyleManager.get_default()
-        style_mgr.set_color_scheme(Adw.ColorScheme.PREFER_DARK)
 
 
 def main():
