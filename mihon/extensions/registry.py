@@ -2,6 +2,7 @@
 Extension registry - discovers, loads, and manages source extensions.
 Supports both native Python extensions and JVM-loaded Tachiyomi extensions.
 """
+import json
 from typing import Dict, List, Optional
 from .base import Extension
 from .allmanga import AllMangaExtension
@@ -12,6 +13,12 @@ from ..core.models import ExtensionInfo
 import logging
 logger = logging.getLogger("registry")
 
+# A single upstream jar can register one source per UI language it supports -
+# Tachiyomi/Mihon's real MangaDex extension alone provides 61. Kept to a
+# setting (not hardcoded) so it stays adjustable without a code change; "all"
+# always passes since it means language-agnostic, not "matches every filter".
+DEFAULT_LANGUAGE_FILTER = ["en"]
+
 
 class ExtensionRegistry:
     """Manages all available and installed extensions."""
@@ -20,6 +27,18 @@ class ExtensionRegistry:
         self._extensions: Dict[str, Extension] = {}
         self._jvm_loaded = False
         self._load_builtins()
+
+    def _language_allowed(self, language: str) -> bool:
+        if not language or language == "all":
+            return True
+        try:
+            from ..core.database import get_db
+            allowed = json.loads(get_db().get_setting(
+                "extension_language_filter", json.dumps(DEFAULT_LANGUAGE_FILTER)
+            ))
+        except Exception:
+            allowed = DEFAULT_LANGUAGE_FILTER
+        return language in allowed
 
     def _load_builtins(self):
         """
@@ -55,15 +74,27 @@ class ExtensionRegistry:
             from .extension_manager import get_extension_manager
             manager = get_extension_manager()
             proxies = manager.load_all_installed()
+            skipped = 0
             for proxy in proxies:
+                if not self._language_allowed(proxy.info.language):
+                    skipped += 1
+                    continue
                 self._extensions[proxy.id] = proxy
-                logger.info(f"Registered JVM extension: {proxy.name}")
+                logger.info(f"Registered JVM extension: {proxy.name} [{proxy.info.language}]")
+            if skipped:
+                logger.info(f"Skipped {skipped} JVM source(s) outside the language filter")
             self._jvm_loaded = True
         except Exception as e:
             logger.error(f"Failed to load JVM extensions: {e}")
 
     def register(self, extension: Extension):
         """Manually register an extension (e.g. after APK install)."""
+        if not self._language_allowed(extension.info.language):
+            logger.info(
+                f"Skipping {extension.info.name} [{extension.info.language}]: "
+                "outside the language filter"
+            )
+            return
         self._extensions[extension.id] = extension
 
     def unregister(self, extension_id: str):

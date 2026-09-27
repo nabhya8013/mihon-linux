@@ -325,6 +325,7 @@ class Database:
             "desktop_notifications_enabled": "1",
             "smart_update_excluded_categories": "[]",
             "appearance_theme": "dark",
+            "extension_language_filter": json.dumps(["en"]),
             "reader_tap_invert": "0",
             "reader_fullscreen": "0",
             "reader_keep_screen_on": "0",
