@@ -34,16 +34,25 @@ jobs:
       - name: Install Python dependencies
         run: |
           python -m pip install --upgrade pip
-          # PyGObject comes from apt above; installing it from pip as well
-          # would shadow the system typelibs.
           pip install pytest
-          pip install $(grep -v '^PyGObject' requirements.txt | tr '\n' ' ')
+          # PyGObject comes from apt above; installing it from pip as well
+          # would shadow the system typelibs. Comment lines and blanks need
+          # stripping by hand too: piping straight into `pip install -r`
+          # would handle those fine, but flattening to a bare arg list with
+          # `tr` does not - a `#` (or any word from a comment line) becomes
+          # its own invalid requirement spec and pip refuses the whole batch.
+          grep -vE '^(PyGObject|#|\s*$)' requirements.txt > /tmp/ci-requirements.txt
+          pip install -r /tmp/ci-requirements.txt
 
       - name: Run tests
         # Several tests build real GTK widgets, so they need a display.
+        # actions/setup-python provisions its own CPython build, entirely
+        # separate from the system one apt's python3-gi installed into -
+        # PYTHONPATH is what makes that install visible here, same as
+        # GI_TYPELIB_PATH already did for the typelibs it loads at runtime.
         run: xvfb-run -a python -m pytest tests/ -v
         env:
-          PYTHONPATH: ${{ github.workspace }}
+          PYTHONPATH: ${{ github.workspace }}:/usr/lib/python3/dist-packages
           GI_TYPELIB_PATH: /usr/lib/x86_64-linux-gnu/girepository-1.0
 
       - name: Check every module imports
@@ -61,6 +70,9 @@ jobs:
               raise SystemExit("Import failures:\n" + "\n".join(failed))
           print("All modules import cleanly.")
           PY
+        env:
+          PYTHONPATH: ${{ github.workspace }}:/usr/lib/python3/dist-packages
+          GI_TYPELIB_PATH: /usr/lib/x86_64-linux-gnu/girepository-1.0
 
   lint:
     name: Lint
