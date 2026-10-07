@@ -245,15 +245,27 @@ sure `~/.local/bin` is on your `PATH`.
 
 ## Packaging
 
-`data/io.github.nabhya8013.MihonLinux.yml` is a Flatpak manifest. It is **not
-buildable as committed**: a Flatpak build has no network access, so the Python
-dependencies must first be turned into hash-pinned sources with
-`flatpak-pip-generator`. The manifest header has the exact command. It is left
-incomplete rather than stubbed, so a build fails loudly instead of appearing to work.
+`data/io.github.nabhya8013.MihonLinux.yml` is a Flatpak manifest for the GNOME 50
+runtime. Python dependencies are pinned by hash in `data/python3-requirements.json`
+because a Flatpak build has no network access. Build and install it locally:
+
+```bash
+flatpak install -y flathub org.gnome.Platform//50 org.gnome.Sdk//50 org.flatpak.Builder
+flatpak run org.flatpak.Builder --user --install --force-clean build-dir \
+    data/io.github.nabhya8013.MihonLinux.yml
+flatpak run io.github.nabhya8013.MihonLinux
+```
+
+The sandbox does not include a JDK, so APK/JVM extensions are unavailable in the
+Flatpak build; the built-in sources and the local source work. After changing
+`requirements.txt`, regenerate the pinned module with the command in the manifest
+header; a test fails if the two disagree. Its data lives under
+`~/.var/app/io.github.nabhya8013.MihonLinux/`, separate from a source checkout.
 
 CI runs on every push: tests under `xvfb`, an import check of every module, `ruff`
 error-level lint, `desktop-file-validate`, `appstreamcli validate`, and a Gradle
-build of the bridge JAR. Tagging `v*` builds a release with a generated changelog.
+build of the bridge JAR. A separate workflow builds the Flatpak when packaging or
+app code changes and uploads the bundle as an artifact. Tagging `v*` builds a release with a generated changelog.
 
 ## Troubleshooting
 

@@ -30,8 +30,7 @@ tagged release yet, so everything lives under **Unreleased**.
   bridge.
 - Central logging configuration writing to `~/.local/share/mihon-linux/logs/`.
 - MIT `LICENSE`, `NOTICE` crediting Mihon/Tachiyomi, GitHub Actions CI and release
-  workflows, and Flatpak packaging metadata (not yet buildable: Python dependencies
-  need hash-pinning with `flatpak-pip-generator`).
+  workflows, and Flatpak packaging.
 - `.tachibk` export alongside import, using upstream-compatible source IDs.
 - *More → Backup and Restore* page: restore previews the file first, offers Merge
   or Overwrite for manga already present, and shows progress.
@@ -78,6 +77,10 @@ tagged release yet, so everything lives under **Unreleased**.
 
 ### Fixed
 
+- The Flatpak manifest now builds and runs: it targets the GNOME 50 runtime (47 is
+  end-of-life), installs a sandbox launcher instead of the development `mihon.sh`,
+  keeps the `mihon` package directory when copying, and pins all 56 Python
+  dependency wheels by hash. A new workflow builds it in CI.
 - The manga page showed no description, author or genres when opened from Browse or
   search, even after the details call succeeded: the labels were only filled from
   the listing. They now refresh when details arrive.

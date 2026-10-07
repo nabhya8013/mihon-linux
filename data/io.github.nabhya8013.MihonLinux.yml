@@ -2,19 +2,13 @@
 #
 # Build and install locally:
 #
-#     flatpak install -y flathub org.gnome.Platform//47 org.gnome.Sdk//47
+#     flatpak install -y flathub org.gnome.Platform//50 org.gnome.Sdk//50
 #     flatpak-builder --user --install --force-clean build-dir \
 #         data/io.github.nabhya8013.MihonLinux.yml
 #
-# The Python dependencies below are declared as a placeholder module. Before
-# submitting anywhere, regenerate it with flatpak-pip-generator so every wheel
-# is pinned by hash:
-#
-#     python3 flatpak-pip-generator --requirements-file=requirements.txt \
-#         --output data/python3-requirements
 app-id: io.github.nabhya8013.MihonLinux
 runtime: org.gnome.Platform
-runtime-version: "47"
+runtime-version: "50"
 sdk: org.gnome.Sdk
 
 command: mihon-linux
@@ -37,24 +31,29 @@ finish-args:
   - --filesystem=xdg-download
   - --filesystem=xdg-documents
 
-# NOT YET BUILDABLE. The Python dependencies module below is missing, and a
-# Flatpak build has no network access, so every wheel has to be declared as a
-# hash-pinned source first. Generate it with:
+# Python dependencies are declared in data/python3-requirements.json: every
+# wheel pinned by hash, because a Flatpak build has no network access. Regenerate
+# it after changing requirements.txt (PyGObject is left out, the GNOME runtime
+# provides it):
 #
-#     git clone https://github.com/flatpak/flatpak-builder-tools
-#     python3 flatpak-builder-tools/pip/flatpak-pip-generator #         --requirements-file=requirements.txt #         --output data/python3-requirements
+#     grep -vE '^(PyGObject|#|\s*$)' requirements.txt > /tmp/req.txt
+#     python3 flatpak-pip-generator --runtime org.gnome.Sdk//50 \
+#         --prefer-wheels cffi,charset_normalizer,cryptography,curl_cffi,lxml,markupsafe,mutf8,protobuf,psutil,pyyaml,sqlalchemy,wcwidth \
+#         --requirements-file=/tmp/req.txt --output data/python3-requirements
 #
-# then add `- data/python3-requirements.json` as the first entry under
-# `modules`. It is left out rather than stubbed, so a build fails loudly
-# instead of appearing to work.
+# flatpak-pip-generator comes from
+# https://github.com/flatpak/flatpak-builder-tools/tree/master/pip
 modules:
+  - python3-requirements.json
+
   # The JVM bridge is not bundled: it needs a JDK, and extension APKs are user
   # supplied. Built-in sources work without it.
   - name: mihon-linux
     buildsystem: simple
     build-commands:
-      - install -Dm755 mihon.sh ${FLATPAK_DEST}/bin/mihon-linux
-      - cp -r mihon ${FLATPAK_DEST}/share/mihon-linux-app
+      - install -Dm755 data/mihon-linux-flatpak.sh ${FLATPAK_DEST}/bin/mihon-linux
+      - mkdir -p ${FLATPAK_DEST}/share/mihon-linux-app
+      - cp -r mihon ${FLATPAK_DEST}/share/mihon-linux-app/mihon
       - install -Dm644 run.py ${FLATPAK_DEST}/share/mihon-linux-app/run.py
       - install -Dm644 data/io.github.nabhya8013.MihonLinux.desktop
         ${FLATPAK_DEST}/share/applications/io.github.nabhya8013.MihonLinux.desktop

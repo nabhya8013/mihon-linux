@@ -1,0 +1,66 @@
+name: Flatpak
+
+on:
+  push:
+    branches: ["**"]
+    paths:
+      - "data/**"
+      - "mihon/**"
+      - "requirements.txt"
+      - ".github/workflows/flatpak.yml"
+  pull_request:
+    paths:
+      - "data/**"
+      - "mihon/**"
+      - "requirements.txt"
+      - ".github/workflows/flatpak.yml"
+  workflow_dispatch:
+
+concurrency:
+  group: flatpak-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Build Flatpak
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install flatpak and flatpak-builder
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends flatpak flatpak-builder
+
+      - name: Install the GNOME runtime and SDK
+        run: |
+          flatpak remote-add --user --if-not-exists flathub https://dl.flathub.org/repo/flathub.flatpakrepo
+          flatpak install --user -y --noninteractive flathub org.gnome.Platform//50 org.gnome.Sdk//50
+
+      - name: Build
+        run: |
+          flatpak-builder --user --force-clean --disable-rofiles-fuse \
+            --repo=repo build-dir data/io.github.nabhya8013.MihonLinux.yml
+
+      - name: Smoke test the built app
+        # Imports every dependency the sandbox resolved, so a wheel that was
+        # pinned but does not load (wrong ABI, missing library) fails here.
+        run: |
+          flatpak-builder --user --run build-dir data/io.github.nabhya8013.MihonLinux.yml \
+            python3 -c "
+          import sys; sys.path.insert(0, '/app/share/mihon-linux-app')
+          import curl_cffi, androguard, google.protobuf, rarfile, requests
+          import mihon.core.tachibk_importer, mihon.extensions.apk_extractor
+          print('sandbox imports ok')"
+
+      - name: Export a bundle
+        run: |
+          flatpak build-bundle repo mihon-linux.flatpak io.github.nabhya8013.MihonLinux
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: mihon-linux-flatpak
+          path: mihon-linux.flatpak
+          retention-days: 14
