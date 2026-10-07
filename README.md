@@ -34,6 +34,8 @@ _Not yet added._
   source is only asked again when the copy is stale (details after 24 hours,
   chapters after 1 hour), and a **Refresh** button fetches on demand
 - **Reader**: paged (single/double/auto page, RTL/LTR) and webtoon/continuous modes.
+  The mode is remembered per series, as on Android; the default for new series is in
+  *More → Reader*
   - Fit page or fit width (full width, scrolls), and zoom from 30% to 300%
   - Pages prefetched in a sliding window, so a page turn is instant
   - Landscape scans shown as full two-page spreads
@@ -70,8 +72,9 @@ _Not yet added._
 - **Backup and Restore** (`.tachibk`): *More → Backup and Restore* writes a backup
   Android Mihon can read and restores one with a preview first (manga, chapters, how
   many already exist). Restore brings back chapters, read progress, categories and
-  history, with a **Merge** (keep local data, add what is missing; read never becomes
-  unread) or **Overwrite** choice and a progress bar. Restoring never removes manga or
+  history, AniList/MyAnimeList links and each series' reading mode, with a **Merge**
+  (keep local data, add what is missing; read never becomes unread) or **Overwrite**
+  choice and a progress bar. Restoring never removes manga or
   chapters. Source IDs use upstream's hash, so backups move in both directions
 - **Anti-bot layer**: browser-grade TLS via `curl_cffi`, a WebKit challenge-solver
   window for Cloudflare/DDoS-Guard, and a persistent cookie jar shared between the

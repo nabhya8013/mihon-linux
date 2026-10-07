@@ -50,6 +50,10 @@ tagged release yet, so everything lives under **Unreleased**.
 - Download queue controls: cancel, retry, remove, reorder, and move to front;
   configurable download location and worker count.
 - Refresh button on the manga page to fetch details and chapters on demand.
+- Reader direction is remembered per series; changing it in the reader no longer
+  changes the default for every other series. *Use Default* clears it.
+- Backups carry AniList/MyAnimeList links and each series' reading mode in both
+  directions, using Android Mihon's tracker ids, status codes and score scales.
 - Upcoming view in the Updates tab: next-chapter predictions from each series'
   release rhythm, grouped by day.
 - Incognito mode (*More*): reading records no history, page, read mark or tracker
@@ -92,6 +96,9 @@ tagged release yet, so everything lives under **Unreleased**.
 - App icon replaced with the new circular logo.
 
 ### Fixed
+
+- MangaDex, AllManga and MangaFire now record the source's chapter order, so the
+  *Source order* sort and next/previous chapter place unnumbered chapters correctly.
 
 - Reader, webtoon mode: reading progress, history and tracker updates are now saved
   as you scroll (previously only when the chapter ended), and a chapter reopens at

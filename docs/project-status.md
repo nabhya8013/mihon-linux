@@ -74,7 +74,8 @@ What Mihon Linux can do today, how it got here, and what is still open.
 - **End of chapter:** a card shows the chapter just finished and the next one. One more "next" (click, key or button) opens it; "previous" or **Stay** keeps reading.
 - **Webtoon side padding:** 0–50% of the window left empty at the sides, so strips do not stretch across a wide window.
 - **Keys:** arrows or `A`/`D` turn pages, `Page Up`/`Page Down` and `Space` scroll or page, `Backspace` goes back, `Home`/`End` jump to the first or last page, `N`/`P` change chapter, `+`/`-`/`0` zoom, `F`/`F11` toggle fullscreen, `Esc` closes.
-- **Chapters:** next and previous follow the source's own chapter order, so unnumbered chapters are not skipped. Buttons in the top bar, or `N` and `P`.
+- **Chapters:** next and previous follow the source's own chapter order, so unnumbered chapters are not skipped. All built-in sources record that order. Buttons in the top bar, or `N` and `P`.
+- **Per-series mode:** the reading direction chosen in the reader is saved for that series only, as on Android. *Use Default* returns it to the default from *More → Reader*.
 - **Other settings:** background colour, crop borders, page slider, fullscreen, keep screen on.
 - **Downloads:** downloaded chapters are read from disk in both modes.
 
@@ -98,7 +99,7 @@ What Mihon Linux can do today, how it got here, and what is still open.
 - *More → Backup and Restore* exports a `.tachibk` that Android Mihon can restore, and imports one from Android or from this app.
 - **Preview:** shows manga, chapters, chapters read, and how many manga already exist, before anything is written.
 - **Merge or Overwrite** for manga you already have. Merge keeps your data and never turns read chapters back to unread. Overwrite takes the backup's details and progress. Neither removes manga or chapters.
-- **What is restored:** chapters, read progress, categories and history, with a progress bar. Restoring the same file twice adds nothing.
+- **What is restored:** chapters, read progress, categories, history, AniList/MyAnimeList links and each series' reading mode, with a progress bar. Restoring the same file twice adds nothing. Links to trackers this app does not support (Kitsu and others) are skipped and counted.
 - **Bad files:** corrupt, empty or non-backup files are rejected with a clear message.
 - **Source IDs:** use upstream's hashing, so backups move in both directions.
 
@@ -166,9 +167,8 @@ tests/               pytest suite
 ## Known limitations
 
 - **No JVM extensions in the Flatpak:** the sandbox has no JDK, so APK extensions only work in a source checkout.
-- **Chapter order on built-in sources:** MangaDex and AllManga do not record the source's chapter order. For them, next and previous chapter fall back to chapter numbers, and unnumbered chapters cannot be placed.
 - **Backup coverage:**
-  - Tracker links in a backup are not restored.
+  - Only AniList and MyAnimeList links are restored; links to other trackers are skipped.
   - History restores only the last-read time per chapter.
   - The `.tachibk` format has no version field to validate against.
 - **Caching:** the cache ages are fixed (24 hours and 1 hour), with no setting. There is no ETag or `If-Modified-Since` support.
