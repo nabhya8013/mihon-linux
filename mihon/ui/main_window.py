@@ -330,7 +330,8 @@ class MainWindow(Adw.ApplicationWindow):
         ("Reader", "Direction, layout, background", "view-paged-symbolic", "_build_reader_settings_page"),
         ("Appearance", "Theme", "applications-graphics-symbolic", "_build_appearance_settings_page"),
         ("Library", "Updates, badges, notifications", "library-symbolic", "_build_library_settings_page"),
-        ("Downloads and Data", "Queue, location, backup", "folder-download-symbolic", "_build_downloads_settings_page"),
+        ("Downloads and Data", "Queue, location, cache", "folder-download-symbolic", "_build_downloads_settings_page"),
+        ("Backup and Restore", "Export and import .tachibk backups", "document-save-symbolic", "_build_backup_settings_page"),
         ("Sources", "Local library, extension repositories", "find-location-symbolic", "_build_sources_settings_page"),
         ("Tracking", "AniList, MyAnimeList", "network-transmit-receive-symbolic", "_build_tracking_settings_page"),
         ("About", "Version", "help-about-symbolic", "_build_about_settings_page"),
@@ -438,35 +439,8 @@ class MainWindow(Adw.ApplicationWindow):
         max_dl_row.connect("notify::value", self._on_max_downloads_changed)
         dl_group.add(max_dl_row)
 
-        # Data group: backup / restore
-        data_group = Adw.PreferencesGroup(
-            title="Data",
-            description="Move your library between this app and Mihon on Android.",
-        )
+        data_group = Adw.PreferencesGroup(title="Storage")
         content.append(data_group)
-
-        import_row = Adw.ActionRow(
-            title="Import .tachibk backup",
-            subtitle="Restore your library, categories, and chapter metadata from an Android Mihon backup file.",
-        )
-        import_btn = Gtk.Button(label="Choose File…")
-        import_btn.add_css_class("suggested-action")
-        import_btn.set_valign(Gtk.Align.CENTER)
-        import_btn.connect("clicked", self._on_import_tachibk_clicked)
-        import_row.add_suffix(import_btn)
-        import_row.set_activatable_widget(import_btn)
-        data_group.add(import_row)
-
-        export_row = Adw.ActionRow(
-            title="Export .tachibk backup",
-            subtitle="Write your library, categories, and chapter progress to a file Android Mihon can restore.",
-        )
-        export_btn = Gtk.Button(label="Save As…")
-        export_btn.set_valign(Gtk.Align.CENTER)
-        export_btn.connect("clicked", self._on_export_tachibk_clicked)
-        export_row.add_suffix(export_btn)
-        export_row.set_activatable_widget(export_btn)
-        data_group.add(export_row)
 
         cache_row = Adw.ActionRow(
             title="Clear page cache",
@@ -484,6 +458,45 @@ class MainWindow(Adw.ApplicationWindow):
         cache_row.add_suffix(clear_cache_btn)
         data_group.add(cache_row)
         self._refresh_cache_size()
+
+    def _build_backup_settings_page(self, content):
+        export_group = Adw.PreferencesGroup(
+            title="Back up",
+            description="Write your library to a file Mihon on Android can restore.",
+        )
+        content.append(export_group)
+
+        export_row = Adw.ActionRow(
+            title="Export .tachibk backup",
+            subtitle="Library, categories, chapter read progress, and reading history.",
+        )
+        export_btn = Gtk.Button(label="Save As…")
+        export_btn.set_valign(Gtk.Align.CENTER)
+        export_btn.connect("clicked", self._on_export_tachibk_clicked)
+        export_row.add_suffix(export_btn)
+        export_row.set_activatable_widget(export_btn)
+        export_group.add(export_row)
+
+        import_group = Adw.PreferencesGroup(
+            title="Restore",
+            description=(
+                "Pick a backup and review what it contains before anything is "
+                "written. Restoring never removes manga or chapters."
+            ),
+        )
+        content.append(import_group)
+
+        import_row = Adw.ActionRow(
+            title="Import .tachibk backup",
+            subtitle="From this app or from Mihon on Android.",
+        )
+        import_btn = Gtk.Button(label="Choose File…")
+        import_btn.add_css_class("suggested-action")
+        import_btn.set_valign(Gtk.Align.CENTER)
+        import_btn.connect("clicked", self._on_import_tachibk_clicked)
+        import_row.add_suffix(import_btn)
+        import_row.set_activatable_widget(import_btn)
+        import_group.add(import_row)
 
     def _build_reader_settings_page(self, content):
         # Reader settings group
@@ -1513,15 +1526,87 @@ class MainWindow(Adw.ApplicationWindow):
             return
 
         path = Path(file.get_path())
-        busy = self._busy_dialog(
-            "Importing backup",
-            f"Reading {path.name}. This can take a while for a large library.",
+        busy = self._busy_dialog("Reading backup", f"Checking {path.name}.")
+
+        def work():
+            from ..core.tachibk_importer import preview_backup
+            try:
+                preview = preview_backup(path)
+            except Exception as exc:
+                GLib.idle_add(self._on_import_previewed, busy, path, None, str(exc))
+                return
+            GLib.idle_add(self._on_import_previewed, busy, path, preview, None)
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def _on_import_previewed(self, busy, path, preview, error):
+        busy.close()
+        if error is not None:
+            self._show_message("Cannot restore this file", error)
+            return False
+
+        lines = [
+            f"{preview.manga} manga ({preview.new_manga} new, "
+            f"{preview.existing_manga} already in your database)",
+            f"{preview.chapters} chapters, {preview.read_chapters} marked read",
+            f"{preview.categories} categories",
+        ]
+        dialog = Adw.MessageDialog(
+            transient_for=self,
+            modal=True,
+            heading=f"Restore {path.name}?",
+            body="\n".join(lines),
         )
+
+        choice_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
+        merge_btn = Gtk.CheckButton(label="Merge: keep my data, add what is missing")
+        merge_btn.set_active(True)
+        overwrite_btn = Gtk.CheckButton(label="Overwrite: the backup replaces my details and progress")
+        overwrite_btn.set_group(merge_btn)
+        choice_box.append(merge_btn)
+        choice_box.append(overwrite_btn)
+        if preview.existing_manga == 0:
+            # Nothing to conflict with, so the choice would be meaningless.
+            choice_box.set_visible(False)
+        dialog.set_extra_child(choice_box)
+
+        dialog.add_response("cancel", "Cancel")
+        dialog.add_response("restore", "Restore")
+        dialog.set_response_appearance("restore", Adw.ResponseAppearance.SUGGESTED)
+        dialog.set_default_response("restore")
+        dialog.set_close_response("cancel")
+
+        def on_response(_dialog, response):
+            if response != "restore":
+                return
+            from ..core.tachibk_importer import ConflictMode
+            mode = ConflictMode.OVERWRITE if overwrite_btn.get_active() else ConflictMode.MERGE
+            self._run_import(path, mode)
+
+        dialog.connect("response", on_response)
+        dialog.present()
+        return False
+
+    def _run_import(self, path, mode):
+        progress_bar = Gtk.ProgressBar()
+        progress_bar.set_show_text(True)
+        progress_bar.set_text("Starting…")
+        busy = Adw.MessageDialog(
+            transient_for=self,
+            modal=True,
+            heading="Restoring backup",
+            body=f"Restoring {path.name}. Do not close the app.",
+        )
+        busy.set_extra_child(progress_bar)
+        busy.present()
+
+        def on_progress(done, total):
+            GLib.idle_add(self._set_import_progress, progress_bar, done, total)
 
         def work():
             from ..core.tachibk_importer import import_tachibk
             try:
-                result = import_tachibk(path, apply=True)
+                result = import_tachibk(path, apply=True, mode=mode, progress=on_progress)
             except Exception as exc:
                 GLib.idle_add(self._on_import_done, busy, None, str(exc))
                 return
@@ -1529,19 +1614,32 @@ class MainWindow(Adw.ApplicationWindow):
 
         threading.Thread(target=work, daemon=True).start()
 
+    @staticmethod
+    def _set_import_progress(progress_bar, done, total):
+        progress_bar.set_fraction(done / total if total else 1.0)
+        progress_bar.set_text(f"{done} of {total} manga")
+        return False
+
     def _on_import_done(self, busy, result, error):
         busy.close()
         if error is not None:
             self._show_message("Import failed", error)
             return False
-        if result is None or not result.ok:
-            errors = "\n".join(result.errors) if result else "Unknown error"
-            self._show_message("Import failed", errors)
+        if result is None:
+            self._show_message("Import failed", "Unknown error")
             return False
-
-        self._show_message("Import complete", result.summary())
-        notify(self, result.summary())
-        self._refresh_after_import()
+        if result.errors:
+            shown = result.errors[:10]
+            extra = len(result.errors) - len(shown)
+            body = result.summary() + "\n\n" + "\n".join(shown)
+            if extra > 0:
+                body += f"\n…and {extra} more (see the log)"
+            self._show_message("Restore finished with errors", body)
+        else:
+            self._show_message("Restore complete", result.summary())
+            notify(self, result.summary())
+        if result.applied:
+            self._refresh_after_import()
         return False
 
     def _refresh_after_import(self):

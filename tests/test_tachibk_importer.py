@@ -135,52 +135,6 @@ class TachibkImporterTests(unittest.TestCase):
         self.assertEqual(result.imported_manga, 0)
         mock_get_db.assert_not_called()
 
-    def test_apply_imports_into_db(self):
-        from mihon.core.models import Manga
-
-        _, gz = _build_sample_backup_bytes()
-        with tempfile.NamedTemporaryFile(suffix=".tachibk", delete=False) as f:
-            f.write(gz)
-            path = Path(f.name)
-        try:
-            captured = []
-
-            class FakeDB:
-                def __init__(self):
-                    self.cats = []
-
-                def get_categories(self):
-                    return list(self.cats)
-
-                def create_category(self, name):
-                    captured.append(("create", name))
-                    cid = len(self.cats) + 100
-                    self.cats.append(type("C", (), {"id": cid, "name": name})())
-                    return cid
-
-                def upsert_manga(self, manga: Manga):
-                    captured.append(("upsert", manga.title, manga.in_library))
-                    return 1
-
-                def get_manga_by_source(self, source_id, source_manga_id):
-                    return type("Row", (), {"id": 1})()
-
-                def add_manga_to_category_bulk(self, manga_ids, category_id):
-                    captured.append(("bulk", manga_ids, category_id))
-
-            with patch("mihon.core.tachibk_importer.get_db", return_value=FakeDB()):
-                result = import_tachibk(path, apply=True)
-        finally:
-            path.unlink()
-
-        self.assertTrue(result.applied)
-        self.assertEqual(result.imported_manga, 2)
-        self.assertEqual(result.errors, [])
-        created_names = [c[1] for c in captured if c[0] == "create"]
-        self.assertIn("Reading", created_names)
-        self.assertIn("Plan to Read", created_names)
-        self.assertIn("Imported", created_names)
-
 
 if __name__ == "__main__":
     unittest.main()

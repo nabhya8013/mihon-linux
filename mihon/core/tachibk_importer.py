@@ -18,13 +18,14 @@ import io
 import logging
 import time
 from dataclasses import dataclass, field
+from enum import Enum
 from pathlib import Path
-from typing import List, Optional
+from typing import Callable, List, Optional
 
 from google.protobuf import descriptor_pb2, descriptor_pool, message_factory, text_format
 
 from .database import get_db
-from .models import Manga, ReadingStatus
+from .models import Chapter, Manga, ReadingStatus
 from .source_ids import to_local_id
 
 logger = logging.getLogger("tachibk_importer")
@@ -147,6 +148,23 @@ def _gunzip(path: Path) -> bytes:
         return f.read()
 
 
+class BackupError(Exception):
+    """The file is not a usable Mihon backup. The message is safe to show."""
+
+
+class ConflictMode(str, Enum):
+    """
+    What to do with a manga that is already in the local database.
+
+    MERGE keeps the local copy and only adds what it lacks: missing chapters,
+    categories, and read progress (read stays read, the further page wins).
+    OVERWRITE replaces the local metadata and read progress with the backup's.
+    Neither mode removes a manga from the library or deletes a chapter.
+    """
+    MERGE = "merge"
+    OVERWRITE = "overwrite"
+
+
 @dataclass
 class RestoredManga:
     source: int
@@ -178,9 +196,15 @@ class RestoredBackup:
 def parse_backup(path: Path) -> RestoredBackup:
     """Parse a .tachibk file into structured data without touching the DB."""
     backup_cls = _ensure_message_classes()
-    raw = _gunzip(path)
-    msg = backup_cls()
-    msg.ParseFromString(raw)
+    try:
+        raw = _gunzip(path)
+        msg = backup_cls()
+        msg.ParseFromString(raw)
+    except Exception as exc:
+        raise BackupError(f"{path.name} is not a readable Mihon backup ({exc})") from exc
+
+    if not (msg.backupManga or msg.backupCategories or msg.backupSources):
+        raise BackupError(f"{path.name} contains no library data")
 
     backup = RestoredBackup(total_bytes=len(raw))
     for category in msg.backupCategories:
@@ -279,10 +303,42 @@ def _manga_to_library(manga: RestoredManga) -> Manga:
 
 
 @dataclass
+class ImportPreview:
+    """What a restore would touch, computed without writing anything."""
+    manga: int = 0
+    categories: int = 0
+    chapters: int = 0
+    read_chapters: int = 0
+    existing_manga: int = 0
+
+    @property
+    def new_manga(self) -> int:
+        return self.manga - self.existing_manga
+
+
+def preview_backup(path: Path) -> ImportPreview:
+    """Parse ``path`` and count what a restore would do. Raises BackupError."""
+    backup = parse_backup(path)
+    db = get_db()
+    preview = ImportPreview(
+        manga=len(backup.mangas),
+        categories=len([c for c in backup.categories if c[0]]),
+    )
+    for restored in backup.mangas:
+        preview.chapters += len(restored.chapters)
+        preview.read_chapters += sum(1 for c in restored.chapters if c["read"])
+        if db.get_manga_by_source(to_local_id(restored.source), restored.url) is not None:
+            preview.existing_manga += 1
+    return preview
+
+
+@dataclass
 class ImportResult:
     backup: Optional[RestoredBackup] = None
     applied: bool = False
     imported_manga: int = 0
+    new_manga: int = 0
+    imported_chapters: int = 0
     imported_categories: int = 0
     errors: List[str] = field(default_factory=list)
 
@@ -295,7 +351,9 @@ class ImportResult:
             return "No backup loaded"
         if self.applied:
             return (
-                f"Imported {self.imported_manga} manga, "
+                f"Restored {self.imported_manga} manga "
+                f"({self.new_manga} new), "
+                f"{self.imported_chapters} chapters, "
                 f"{self.imported_categories} categories, "
                 f"{len(self.errors)} errors"
             )
@@ -306,15 +364,103 @@ class ImportResult:
         )
 
 
+def _restore_chapters(db, manga_id: int, restored: RestoredManga, mode: ConflictMode) -> int:
+    """
+    Write one manga's chapters and read progress. Returns chapters inserted.
+
+    Existing chapters are matched on either stored id or url, because the
+    exporter writes `url or source_chapter_id` and the two differ for some
+    sources. Matching on one alone would duplicate every chapter on a
+    round trip.
+    """
+    existing = {}
+    for chapter in db.get_chapters(manga_id):
+        existing[chapter.source_chapter_id] = chapter
+        if chapter.url:
+            existing.setdefault(chapter.url, chapter)
+
+    to_insert: List[Chapter] = []
+    to_overwrite: List[Chapter] = []
+    progress = {}
+    for entry in restored.chapters:
+        key = entry["url"]
+        if not key:
+            continue
+        read, page = bool(entry["read"]), int(entry["last_page_read"] or 0)
+        local = existing.get(key)
+        if local is None:
+            to_insert.append(Chapter(
+                manga_id=manga_id,
+                source_chapter_id=key,
+                title=entry["name"],
+                chapter_number=entry["chapter_number"],
+                scanlator=entry["scanlator"],
+                uploaded_at=(entry["date_upload"] / 1000.0) if entry["date_upload"] else None,
+                source_order=entry["source_order"],
+                read=read,
+                last_page_read=page,
+                url=key,
+            ))
+            continue
+        if mode is ConflictMode.OVERWRITE:
+            local.title = entry["name"] or local.title
+            local.chapter_number = entry["chapter_number"]
+            local.scanlator = entry["scanlator"]
+            if entry["date_upload"]:
+                local.uploaded_at = entry["date_upload"] / 1000.0
+            local.source_order = entry["source_order"]
+            to_overwrite.append(local)
+            progress[local.source_chapter_id] = (read, page)
+        else:
+            progress[local.source_chapter_id] = (
+                local.read or read,
+                max(local.last_page_read or 0, page),
+            )
+
+    if to_insert or to_overwrite:
+        db.upsert_chapters(to_insert + to_overwrite)
+    db.restore_chapter_progress(manga_id, progress)
+    # Inserting chapters does not refresh the cached count, and an all-new
+    # chapter list leaves `progress` empty, so recompute unconditionally.
+    db.update_unread_count(manga_id)
+    return len(to_insert)
+
+
+def _restore_history(db, manga_id: int, restored: RestoredManga) -> None:
+    if not restored.history:
+        return
+    by_url = {}
+    for chapter in db.get_chapters(manga_id):
+        by_url[chapter.source_chapter_id] = chapter
+        if chapter.url:
+            by_url.setdefault(chapter.url, chapter)
+    for entry in restored.history:
+        chapter = by_url.get(entry["url"])
+        if chapter is None or not entry["last_read"]:
+            continue
+        db.restore_history_entry(
+            manga_id, chapter.id, chapter.last_page_read or 0, entry["last_read"] / 1000.0
+        )
+
+
 def import_tachibk(
     path: Path,
     *,
     apply: bool = False,
     add_to_default_category: bool = True,
+    mode: ConflictMode = ConflictMode.MERGE,
+    progress: Optional[Callable[[int, int], None]] = None,
 ) -> ImportResult:
-    """Parse a .tachibk file and (optionally) write it into the DB."""
+    """
+    Parse a .tachibk file and (optionally) write it into the DB.
+
+    ``progress(done, total)`` is called after each manga, from the calling
+    thread, so a UI caller must marshal it onto the main loop itself.
+    """
     try:
         backup = parse_backup(path)
+    except BackupError as exc:
+        return ImportResult(backup=None, errors=[str(exc)])
     except Exception as exc:
         logger.exception("Failed to parse backup %s", path)
         return ImportResult(backup=None, errors=[f"Failed to parse backup: {exc}"])
@@ -348,33 +494,51 @@ def import_tachibk(
             default_category_id = db.create_category(target)
             result.imported_categories += 1
 
-    for restored in backup.mangas:
+    total = len(backup.mangas)
+    for done, restored in enumerate(backup.mangas, start=1):
         try:
             manga = _manga_to_library(restored)
-            db.upsert_manga(manga)
-        except Exception as exc:  # pragma: no cover
-            result.errors.append(f"DB write failed for {restored.title!r}: {exc}")
-            continue
+            before = db.get_manga_by_source(manga.source_id, manga.source_manga_id)
+            if before is None or mode is ConflictMode.OVERWRITE:
+                db.upsert_manga(manga)
+            row = db.get_manga_by_source(manga.source_id, manga.source_manga_id)
+            if row is None:
+                continue
+            if before is None:
+                result.new_manga += 1
+            elif restored.favorite and not before.in_library:
+                # The upsert never touches in_library on conflict, so a manga
+                # that was only browsed before would stay out of the library.
+                db.add_to_library(row.id)
 
-        row = db.get_manga_by_source(manga.source_id, manga.source_manga_id)
-        if row is None:
-            continue
-        if default_category_id is not None:
-            db.add_manga_to_category_bulk([row.id], default_category_id)
-        for category_index in restored.categories:
-            category_id = category_id_by_order.get(category_index)
-            if category_id is not None:
-                db.add_manga_to_category_bulk([row.id], category_id)
-        result.imported_manga += 1
+            if default_category_id is not None:
+                db.add_manga_to_category_bulk([row.id], default_category_id)
+            for category_index in restored.categories:
+                category_id = category_id_by_order.get(category_index)
+                if category_id is not None:
+                    db.add_manga_to_category_bulk([row.id], category_id)
+
+            result.imported_chapters += _restore_chapters(db, row.id, restored, mode)
+            _restore_history(db, row.id, restored)
+            result.imported_manga += 1
+        except Exception as exc:
+            logger.exception("Restoring %r failed", restored.title)
+            result.errors.append(f"Restore failed for {restored.title!r}: {exc}")
+        if progress is not None:
+            progress(done, total)
 
     result.applied = True
     return result
 
 
 __all__ = [
+    "BackupError",
+    "ConflictMode",
+    "ImportPreview",
     "ImportResult",
     "RestoredBackup",
     "RestoredManga",
     "import_tachibk",
     "parse_backup",
+    "preview_backup",
 ]

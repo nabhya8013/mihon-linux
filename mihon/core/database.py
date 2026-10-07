@@ -603,6 +603,53 @@ class Database:
         )
         self.conn.commit()
 
+    def restore_chapter_progress(self, manga_id: int, progress: dict) -> None:
+        """
+        Set read state for several chapters of one manga at once.
+
+        ``progress`` maps ``source_chapter_id`` to ``(read, last_page_read)``.
+        `upsert_chapters` deliberately leaves read state alone on conflict, so a
+        backup restore needs its own write path for chapters already stored.
+        """
+        if not progress:
+            return
+        with self.transaction():
+            for source_chapter_id, (read, page) in progress.items():
+                self.conn.execute(
+                    "UPDATE chapters SET read=?, last_page_read=? "
+                    "WHERE manga_id=? AND source_chapter_id=?",
+                    (int(bool(read)), int(page or 0), manga_id, source_chapter_id),
+                )
+            self.conn.commit()
+        self.update_unread_count(manga_id)
+
+    def restore_history_entry(self, manga_id: int, chapter_id: int, page: int, read_at: float) -> bool:
+        """
+        Insert a history row with a past timestamp, unless the chapter has one.
+
+        Returns True when a row was written. `last_read_at` only ever moves
+        forward, so restoring an old backup cannot make a manga look less
+        recently read than it already is.
+        """
+        with self.transaction():
+            exists = self.conn.execute(
+                "SELECT 1 FROM history WHERE manga_id=? AND chapter_id=?",
+                (manga_id, chapter_id),
+            ).fetchone()
+            if exists:
+                return False
+            self.conn.execute(
+                "INSERT INTO history(manga_id, chapter_id, page, read_at) VALUES(?,?,?,?)",
+                (manga_id, chapter_id, page, read_at),
+            )
+            self.conn.execute(
+                "UPDATE manga SET last_read_at=? WHERE id=? "
+                "AND (last_read_at IS NULL OR last_read_at < ?)",
+                (read_at, manga_id, read_at),
+            )
+            self.conn.commit()
+            return True
+
     def update_download_status(self, chapter_id: int, status: DownloadStatus, local_path: str = None):
         if local_path:
             self.conn.execute(
