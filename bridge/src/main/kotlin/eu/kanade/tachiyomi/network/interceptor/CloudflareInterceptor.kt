@@ -3,6 +3,7 @@ package eu.kanade.tachiyomi.network.interceptor
 import java.net.URI
 import java.nio.file.Files
 import java.nio.file.Path
+import java.nio.file.StandardCopyOption
 import kotlin.io.path.exists
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.encodeToString
@@ -99,12 +100,22 @@ class CloudflareInterceptor(
             timeout_ms = timeoutMs,
         )
         return try {
-            Files.writeString(requestPath, json.encodeToString(payload))
+            writeAtomically(requestPath, json.encodeToString(payload))
             waitForResponse(responsePath)
         } catch (e: Exception) {
             System.err.println("[CloudflareInterceptor] handshake failed: ${e.message}")
             false
         }
+    }
+
+    /**
+     * Write through a temp file and rename, so the solver never reads a
+     * half-written request. The Python side writes its response the same way.
+     */
+    private fun writeAtomically(path: Path, text: String) {
+        val tmp = path.resolveSibling(path.fileName.toString() + ".tmp")
+        Files.writeString(tmp, text)
+        Files.move(tmp, path, StandardCopyOption.REPLACE_EXISTING, StandardCopyOption.ATOMIC_MOVE)
     }
 
     private fun waitForResponse(responsePath: Path): Boolean {
