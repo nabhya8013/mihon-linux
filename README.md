@@ -3,9 +3,11 @@
 Native GTK4/Libadwaita manga reader for Linux, inspired by
 [Mihon](https://github.com/mihonapp/mihon)/Tachiyomi.
 
-> **Status:** early, actively developed. Four built-in sources (three online, one local) plus a JVM bridge for
-> Tachiyomi-style APK extensions. See [`docs/parity-workflow.md`](docs/parity-workflow.md)
-> for the roadmap toward Android feature parity.
+> **Status:** early, actively developed. Four built-in sources (three online, one local)
+> plus a JVM bridge for Tachiyomi-style APK extensions, and a Flatpak build. See
+> [`docs/project-status.md`](docs/project-status.md) for everything built so far and what
+> is left, and [`docs/parity-workflow.md`](docs/parity-workflow.md) for the roadmap toward
+> Android feature parity.
 
 ## Screenshots
 
@@ -27,27 +29,45 @@ _Not yet added._
 - **Updates** tab: scans the library, fetches latest chapters per source, stores new
   chapters, recalculates unread counts, and shows per-manga results
 - **History** tab: recently read chapters
-- **Reader**: paged (single/double/auto page, RTL/LTR) and webtoon/continuous modes,
-  with chapter progress and download support. Pages are prefetched in a sliding
-  window so a page turn is instant, landscape scans are detected and shown as
-  full two-page spreads, and webtoon strips stitch together with no seam
+- **Manga page**: details, chapter list with number / source-order / upload sorting,
+  filters, search and checkbox batch actions. Saved chapters show instantly; the
+  source is only asked again when the copy is stale (details after 24 hours,
+  chapters after 1 hour), and a **Refresh** button fetches on demand
+- **Reader**: paged (single/double/auto page, RTL/LTR) and webtoon/continuous modes.
+  - Fit page or fit width (full width, scrolls), and zoom from 30% to 300%
+  - Pages prefetched in a sliding window, so a page turn is instant
+  - Landscape scans shown as full two-page spreads
+  - Webtoon strips sized from their own aspect ratio and joined with no seam, loaded
+    only near the one you are reading, with progress saved as you scroll and the
+    chapter reopening where you left off
+  - Previous/next chapter in the source's own order, so unnumbered chapters are not
+    skipped
+  - Click the left or right third to turn pages and the middle for the menu, without
+    blocking the mouse wheel
+- **Downloads**: queue with cancel, retry, remove, reorder and move-to-front, a
+  configurable folder and number of parallel downloads; downloaded chapters read
+  from disk in both reader modes
+- **Smart updates**: library checks on startup and every 6, 12 or 24 hours, skipping
+  dropped series and excluded categories, with desktop notifications
 - **APK extension bridge**: loads Tachiyomi/Mihon `.apk` extensions through a Kotlin
   JVM process (see [`bridge/README.md`](bridge/README.md))
 - **Source filters**: sources that expose a Tachiyomi `FilterList` (genre groups,
   status selects, tri-state tags, sort order, free-text fields) get a native GTK
   filter sheet in the source catalog, and the edited state is sent back to the
   source on search
-- **`.tachibk` import/export**: *More → Backup and Restore* writes a backup Android
-  Mihon can read and restores one with a preview first (manga, chapters, how many
-  already exist). Restore brings back chapters, read progress, categories and history,
-  with a **Merge** (keep local data, add what is missing; read never becomes unread) or
-  **Overwrite** choice and a progress bar. Restoring never removes manga or chapters.
-  Source IDs use upstream's hash, so backups move in both directions
+- **Backup and Restore** (`.tachibk`): *More → Backup and Restore* writes a backup
+  Android Mihon can read and restores one with a preview first (manga, chapters, how
+  many already exist). Restore brings back chapters, read progress, categories and
+  history, with a **Merge** (keep local data, add what is missing; read never becomes
+  unread) or **Overwrite** choice and a progress bar. Restoring never removes manga or
+  chapters. Source IDs use upstream's hash, so backups move in both directions
 - **Anti-bot layer**: browser-grade TLS via `curl_cffi`, a WebKit challenge-solver
   window for Cloudflare/DDoS-Guard, and a persistent cookie jar shared between the
   Python app and the JVM bridge
 - **Keyboard shortcuts**: `Ctrl+K` or `/` global search, `Ctrl+R` / `F5` refresh,
-  `Ctrl+1`–`Ctrl+5` tabs, `Ctrl+?` for the full list
+  `Ctrl+1`–`Ctrl+5` tabs, `Ctrl+W` back, `Ctrl+?` for the full list. In the reader:
+  arrow keys or `A`/`D` turn pages (following the reading direction), `W`/`S`/`Space`
+  scroll or page, `N`/`P` next and previous chapter, `Esc` closes
 - **Drag and drop**: drop an APK onto the Extensions tab to install it, drag category
   rows to reorder them
 - **Tracking**: two-way sync with AniList and MyAnimeList. Reading past 85% of a
@@ -57,6 +77,10 @@ _Not yet added._
 - **Global search** (`Ctrl+K`): queries every installed source in parallel and fills
   in a section per source as each one answers, with a per-source timeout so one slow
   source cannot hold up the rest. Doubles as the cross-source migration search
+- **Settings** split into pages: Reader, Appearance (System/Light/Dark), Library,
+  Downloads and Data, Backup and Restore, Sources, Tracking, About
+- **Flatpak**: builds on the GNOME 50 runtime with every Python dependency pinned by
+  hash (see *Packaging*)
 
 ## Project Structure
 
@@ -64,15 +88,19 @@ _Not yet added._
 mihon/
 ├── core/         # database, models, HTTP client, downloader, updater, cookie store,
 │                 # challenge bridge, .tachibk importer/exporter, source ids,
-│                 # page cache, disk cache, global search
+│                 # page cache, disk cache, global search, fetch policy (when to
+│                 # refetch), reader logic (page sizing, taps, chapter order)
 │   └── tracking/ # AniList + MyAnimeList, credential store, retry queue
 ├── extensions/   # built-in sources + APK extractor + JVM extension bridge
 └── ui/           # GTK views (library, browse, updates, history, reader, more,
                   # manga detail, challenge solver, source filters), plus the
                   # library presenter and toast notifications
 
-data/             # .desktop entry, AppStream metainfo, app icons, Flatpak manifest
-.github/          # CI and release workflows
+data/             # .desktop entry, AppStream metainfo, app icons, Flatpak manifest,
+                  # hash-pinned Python dependencies for the Flatpak
+docs/             # project status, parity workflow, behaviour specs
+tests/            # pytest suite
+.github/          # CI, Flatpak and release workflows
 
 bridge/           # standalone Kotlin JSON-RPC bridge for APK/JVM extensions
 ```
@@ -123,6 +151,8 @@ pip install -r requirements.txt
 | `requests` | fallback HTTP backend when `curl_cffi` is unavailable |
 | `PyGObject` | GTK/GI bindings (usually already satisfied by the system package) |
 | `androguard` | reads `AndroidManifest.xml` when converting an extension `.apk` |
+| `protobuf` | reads and writes `.tachibk` backups (the schema is built at runtime, no `protoc` needed) |
+| `rarfile` | optional: `.cbr`/`.rar` chapters in the local source, with an unrar tool on `PATH` |
 
 APK → JAR conversion also downloads [`dex2jar`](https://github.com/pxb1988/dex2jar)
 on first use into `~/.local/share/mihon-linux/tools/`.
@@ -158,6 +188,11 @@ python3 run.py
 4. The app checks each library manga's source and inserts newly discovered chapters.
 5. Unread counts are recalculated and shown on library cards and update rows.
 
+To check automatically, turn on scheduled updates in *More → Library* and pick an
+interval (every 6, 12 or 24 hours). Categories can be excluded there, and dropped
+series skipped. A manga opened right after an update does not fetch its chapter list
+again.
+
 ## Quick Update-Check Smoke Test (CLI)
 
 A non-UI check:
@@ -179,7 +214,8 @@ PY
 
 Other manual source probes live in the repo root as `test_mangadex.py`,
 `test_allmanga.py`, and `test_chapters.py` (run with `python3 test_mangadex.py`).
-The automated pytest suite is under `tests/` (`python -m pytest tests/`).
+The automated pytest suite is under `tests/` (`python -m pytest tests/`, about 470
+tests). The bridge has its own tests: `cd bridge && ./gradlew test`.
 
 ## Local Source
 
@@ -281,6 +317,8 @@ app code changes and uploads the bundle as an artifact. Tagging `v*` builds a re
 | Tracking says "Client ID needed" | Register an API client and paste its ID in *More → Tracking* (see *Tracking Setup*). |
 | Tracker updates stuck in "waiting" | Check you are still logged in, then press **Retry now** in *More → Tracking*. |
 | Local series not showing up | Check the folder in *More → Sources → Local source*, then press **Rescan**. Each series needs its own subfolder. |
+| A manga page shows old chapters | Press **Refresh** on the manga page. Chapter lists are reused for up to an hour. |
+| Restoring a backup says the file is not readable | Make sure it is a `.tachibk` from Mihon or this app; other Tachiyomi forks' formats may differ. |
 | A `.cbr`/`.rar` chapter has no pages | Install the `rarfile` package and an unrar-compatible tool (`unrar`, `unar`, or `bsdtar`), then check the log for which one is still missing. |
 
 ## Notes

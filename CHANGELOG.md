@@ -13,8 +13,9 @@ tagged release yet, so everything lives under **Unreleased**.
 - Advanced library controls: sort options, grid/list display modes, status/unread/
   downloaded filters, batch actions, and per-category persisted preferences
   (`4ad2f20`). Behavior contract: `docs/specs/library-controls.md`.
-- `.tachibk` Android backup import (*More → Data*) — restores manga, categories, and
-  chapter metadata without an external protobuf dependency.
+- `.tachibk` Android backup import, now under *More → Backup and Restore* — restores
+  manga, categories, chapters, read progress and history; the protobuf schema is
+  built at runtime, so `protoc` is not needed.
 - Anti-bot foundation: `curl_cffi` HTTP backend with a Chrome TLS fingerprint,
   WebKit challenge-solver window, persistent cookie jar shared with the JVM bridge,
   per-domain User-Agent synchronization, and an OkHttp `CloudflareInterceptor` in

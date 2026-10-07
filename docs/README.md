@@ -2,6 +2,7 @@
 
 | Doc | What it covers |
 |---|---|
+| [`project-status.md`](project-status.md) | Everything built to date, recent fixes, known limitations, and what is left |
 | [`parity-workflow.md`](parity-workflow.md) | UI parity epics vs. Mihon Android, per-epic status, delivery pattern |
 | [`specs/library-controls.md`](specs/library-controls.md) | Behavior contract for library sort/filter/display/persistence |
 
