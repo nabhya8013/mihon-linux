@@ -18,12 +18,12 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           # The changelog is generated from the commits since the last tag.
           fetch-depth: 0
 
-      - uses: actions/setup-java@v4
+      - uses: actions/setup-java@v6
         with:
           distribution: temurin
           java-version: "21"
@@ -57,7 +57,7 @@ jobs:
             -o "mihon-linux-${TAG}.tar.gz" "$TAG"
 
       - name: Create the GitHub release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           tag_name: ${{ steps.changelog.outputs.tag }}
           body_path: CHANGELOG_RELEASE.md
