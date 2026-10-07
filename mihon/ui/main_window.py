@@ -759,7 +759,8 @@ class MainWindow(Adw.ApplicationWindow):
         content.append(about_group)
 
         about_row = Adw.ActionRow(title="Mihon for Linux")
-        about_row.set_subtitle("Version 1.0.0 – Built with GTK4 + Python")
+        from .. import __version__
+        about_row.set_subtitle(f"Version {__version__} – Built with GTK4 + Python")
         about_group.add(about_row)
 
     def _on_auto_update_toggled(self, row, _pspec):

@@ -1,10 +1,13 @@
 # Changelog
 
 All notable changes to this project are documented here. Format based on
-[Keep a Changelog](https://keepachangelog.com/en/1.1.0/). The project has not cut a
-tagged release yet, so everything lives under **Unreleased**.
+[Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
+
+## [0.1.0] - 2026-10-07
+
+First tagged release. Everything built up to this point is listed below.
 
 ### Added
 
