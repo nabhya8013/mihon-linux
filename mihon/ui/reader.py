@@ -266,6 +266,7 @@ class WebtoonView(Gtk.ScrolledWindow):
         self._on_page_visible = None
         self._on_end = None
         self._zoom = 1.0
+        self._padding = 0
         self._width = 0
         self._current = 0
         self._generation = 0
@@ -285,6 +286,13 @@ class WebtoonView(Gtk.ScrolledWindow):
     def set_zoom(self, zoom: float):
         self._zoom = reader_logic.clamp_zoom(zoom)
         self._resize_strips()
+
+    def set_padding(self, percent: int):
+        self._padding = percent
+        self._resize_strips()
+
+    def _target_width(self) -> int:
+        return reader_logic.webtoon_strip_width(self._view_width(), self._zoom, self._padding)
 
     def set_pages(self, pages, on_page_visible=None, loader=None, start_index=0, **_ignored):
         self._generation += 1
@@ -373,8 +381,7 @@ class WebtoonView(Gtk.ScrolledWindow):
         self._apply_anchor()
 
     def _resize_strips(self):
-        view_w = self._view_width()
-        width = max(1, round(view_w * self._zoom)) if view_w > 0 else 0
+        width = self._target_width()
         if width == self._width or not self._pictures:
             self._width = width
             return
@@ -387,7 +394,7 @@ class WebtoonView(Gtk.ScrolledWindow):
         self._apply_anchor()
 
     def _on_layout_changed(self, *_):
-        if self._view_width() and round(self._view_width() * self._zoom) != self._width:
+        if self._view_width() and self._target_width() != self._width:
             GLib.idle_add(lambda: self._resize_strips() or False)
         self._apply_anchor()
 
@@ -468,6 +475,9 @@ class ReaderView(Gtk.Box):
         self._scale_type = "fit_page"  # fit_page | fit_width
         self._crop_borders = False
         self._tap_invert = False
+        self._tap_layout = "standard"
+        self._wheel_turns = False
+        self._webtoon_padding = 0
         self._keep_screen_on = False
         self._fullscreen_enabled = False
         self._show_slider = True
@@ -542,6 +552,17 @@ class ReaderView(Gtk.Box):
         self._tap_gesture.set_button(Gdk.BUTTON_PRIMARY)
         self._tap_gesture.connect("released", self._on_paged_click)
         self._paged_overlay.add_controller(self._tap_gesture)
+
+        # Optional wheel page turns. Capture phase, so the decision is made
+        # before the scrolled window consumes the event; returning False
+        # lets a tall page scroll normally.
+        self._wheel_controller = Gtk.EventControllerScroll.new(
+            Gtk.EventControllerScrollFlags.VERTICAL
+        )
+        self._wheel_controller.set_propagation_phase(Gtk.PropagationPhase.CAPTURE)
+        self._wheel_controller.connect("scroll", self._on_paged_wheel)
+        self._paged_overlay.add_controller(self._wheel_controller)
+        self._last_wheel_turn = 0.0
         self._reader_stack.add_named(self._paged_overlay, "paged")
 
         # Webtoon view
@@ -575,6 +596,7 @@ class ReaderView(Gtk.Box):
         
         # Set background to main overlay
         self._main_overlay.set_child(self._reader_stack)
+        self._main_overlay.add_overlay(self._build_chapter_end_card())
 
         # ── HUD Overlays (Foreground layers) ───────────────────────────────
 
@@ -777,6 +799,44 @@ class ReaderView(Gtk.Box):
         self._keep_screen_on_toggle.connect("toggled", self._set_keep_screen_on)
         box.append(self._keep_screen_on_toggle)
 
+        self._wheel_turns_toggle = Gtk.CheckButton(label="Scroll Wheel Turns Pages")
+        self._wheel_turns_toggle.set_tooltip_text(
+            "In paged mode, scroll past the end of a page to turn it"
+        )
+        self._wheel_turns_toggle.connect("toggled", self._set_wheel_turns)
+        box.append(self._wheel_turns_toggle)
+
+        # Tap zones
+        tap_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        tap_label = Gtk.Label(label="Tap Zones")
+        tap_label.set_hexpand(True)
+        tap_label.set_halign(Gtk.Align.START)
+        tap_row.append(tap_label)
+        self._tap_layout_dropdown = Gtk.DropDown.new_from_strings(
+            [self._TAP_LAYOUT_NAMES[k] for k in reader_logic.TAP_LAYOUTS]
+        )
+        self._tap_layout_dropdown.set_tooltip_text(
+            "Standard: left/right thirds turn pages. Kindle: top third opens the menu. "
+            "Edges: narrow side strips turn pages. Off: clicks only open the menu."
+        )
+        self._tap_layout_dropdown.connect("notify::selected", self._set_tap_layout)
+        tap_row.append(self._tap_layout_dropdown)
+        box.append(tap_row)
+
+        # Webtoon side padding
+        pad_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        pad_label = Gtk.Label(label="Webtoon Side Padding")
+        pad_label.set_hexpand(True)
+        pad_label.set_halign(Gtk.Align.START)
+        pad_row.append(pad_label)
+        self._padding_dropdown = Gtk.DropDown.new_from_strings(
+            ["None" if p == 0 else f"{p}%" for p in reader_logic.WEBTOON_PADDINGS]
+        )
+        self._padding_dropdown.set_tooltip_text("Narrow webtoon strips on wide windows")
+        self._padding_dropdown.connect("notify::selected", self._set_webtoon_padding)
+        pad_row.append(self._padding_dropdown)
+        box.append(pad_row)
+
         # Background color
         bg_label = Gtk.Label(label="Background")
         bg_label.add_css_class("heading")
@@ -853,6 +913,16 @@ class ReaderView(Gtk.Box):
 
         self._crop_borders = self._db.get_setting("crop_borders", "0") == "1"
         self._tap_invert = self._db.get_setting("reader_tap_invert", "0") == "1"
+        self._tap_layout = self._db.get_setting("reader_tap_layout", "standard")
+        if self._tap_layout not in reader_logic.TAP_LAYOUTS:
+            self._tap_layout = "standard"
+        self._wheel_turns = self._db.get_setting("reader_wheel_turns", "0") == "1"
+        try:
+            self._webtoon_padding = int(self._db.get_setting("reader_webtoon_padding", "0"))
+        except ValueError:
+            self._webtoon_padding = 0
+        if self._webtoon_padding not in reader_logic.WEBTOON_PADDINGS:
+            self._webtoon_padding = 0
         self._fullscreen_enabled = self._db.get_setting("reader_fullscreen", "0") == "1"
         self._keep_screen_on = self._db.get_setting("reader_keep_screen_on", "0") == "1"
         self._show_slider = self._db.get_setting("reader_show_slider", "1") == "1"
@@ -899,9 +969,17 @@ class ReaderView(Gtk.Box):
             self._fullscreen_toggle.set_active(self._fullscreen_enabled)
         if hasattr(self, "_keep_screen_on_toggle"):
             self._keep_screen_on_toggle.set_active(self._keep_screen_on)
+        if hasattr(self, "_wheel_turns_toggle"):
+            self._wheel_turns_toggle.set_active(self._wheel_turns)
+        if hasattr(self, "_tap_layout_dropdown"):
+            self._tap_layout_dropdown.set_selected(reader_logic.TAP_LAYOUTS.index(self._tap_layout))
+        if hasattr(self, "_padding_dropdown"):
+            self._padding_dropdown.set_selected(
+                reader_logic.WEBTOON_PADDINGS.index(self._webtoon_padding)
+            )
 
         if hasattr(self, "_zoom_label"):
-            self._zoom_label.set_text(f"{int(self._zoom * 100)}%")
+            self._zoom_label.set_text(f"{round(self._zoom * 100)}%")
         self._syncing_prefs = False
 
     def _persist_reader_setting(self, key: str, value: str):
@@ -986,6 +1064,7 @@ class ReaderView(Gtk.Box):
     def _apply_scale_and_crop(self):
         for view in (self._page_view, self._double_page_view):
             view.configure(self._scale_type, self._crop_borders, self._zoom)
+        self._webtoon_view.set_padding(self._webtoon_padding)
         self._webtoon_view.set_zoom(self._zoom)
 
     def _apply_background_color(self, color: str):
@@ -1048,6 +1127,30 @@ class ReaderView(Gtk.Box):
             else:
                 self._prev_page()
             return True
+        if keyval in (Gdk.KEY_Page_Down, Gdk.KEY_KP_Page_Down):
+            self._scroll_or_turn(1)
+            return True
+        if keyval in (Gdk.KEY_Page_Up, Gdk.KEY_KP_Page_Up, Gdk.KEY_BackSpace):
+            self._scroll_or_turn(-1)
+            return True
+        if keyval in (Gdk.KEY_Home, Gdk.KEY_KP_Home):
+            self._jump_to_page(0)
+            return True
+        if keyval in (Gdk.KEY_End, Gdk.KEY_KP_End):
+            self._jump_to_page(len(self._pages) - 1)
+            return True
+        if keyval in (Gdk.KEY_f, Gdk.KEY_F, Gdk.KEY_F11):
+            self._fullscreen_toggle.set_active(not self._fullscreen_enabled)
+            return True
+        if keyval in (Gdk.KEY_plus, Gdk.KEY_equal, Gdk.KEY_KP_Add):
+            self._set_zoom(self._zoom + 0.1)
+            return True
+        if keyval in (Gdk.KEY_minus, Gdk.KEY_KP_Subtract):
+            self._set_zoom(self._zoom - 0.1)
+            return True
+        if keyval in (Gdk.KEY_0, Gdk.KEY_KP_0):
+            self._set_zoom(1.0)
+            return True
         if keyval in (Gdk.KEY_n, Gdk.KEY_N):
             self._go_to_chapter(1)
             return True
@@ -1065,6 +1168,7 @@ class ReaderView(Gtk.Box):
         self._chapter = chapter
         self._pages = []
         self._current_page = 0
+        self._hide_chapter_end()
 
         ch_num = f"Ch.{chapter.chapter_number:g}" if chapter.chapter_number >= 0 else chapter.title
         self._chapter_title.set_title(manga.title)
@@ -1272,9 +1376,10 @@ class ReaderView(Gtk.Box):
 
             self._double_left_pb = None
             self._double_right_pb = None
-            self._load_page_pixbuf(left_page, set_left)
+            self._begin_page_load(token, 2 if right_page is not None else 1)
+            self._load_page_pixbuf(left_page, self._counting(token, set_left))
             if right_page is not None:
-                self._load_page_pixbuf(right_page, set_right)
+                self._load_page_pixbuf(right_page, self._counting(token, set_right))
             return
 
         # Single-page load
@@ -1286,7 +1391,41 @@ class ReaderView(Gtk.Box):
                 return
             self._page_view.set_pixbuf(pb)
 
-        self._load_page_pixbuf(page, set_single)
+        self._begin_page_load(token, 1)
+        self._load_page_pixbuf(page, self._counting(token, set_single))
+
+    # How long a page may take before the spinner shows. A cached page
+    # arrives well inside this, so turning through cached pages never
+    # flashes a spinner.
+    SPINNER_DELAY_MS = 150
+
+    def _begin_page_load(self, token, parts):
+        self._page_load_pending = parts
+        self._page_load_token = token
+        if getattr(self, "_spinner_timer", 0):
+            GLib.source_remove(self._spinner_timer)
+        self._spinner_timer = GLib.timeout_add(self.SPINNER_DELAY_MS, self._maybe_show_spinner, token)
+
+    def _maybe_show_spinner(self, token):
+        self._spinner_timer = 0
+        if token == self._render_token and self._page_load_pending > 0:
+            self._page_spinner.set_visible(True)
+            self._page_spinner.start()
+        return False
+
+    def _counting(self, token, callback):
+        """Wrap a page callback so the spinner hides once every part arrived."""
+        def wrapped(pb):
+            if token == getattr(self, "_page_load_token", None):
+                self._page_load_pending -= 1
+                if self._page_load_pending <= 0:
+                    if getattr(self, "_spinner_timer", 0):
+                        GLib.source_remove(self._spinner_timer)
+                        self._spinner_timer = 0
+                    self._page_spinner.stop()
+                    self._page_spinner.set_visible(False)
+            callback(pb)
+        return wrapped
 
     def _load_page_pixbuf(self, page: Page, on_ready):
         if page.local_path:
@@ -1305,6 +1444,10 @@ class ReaderView(Gtk.Box):
             image_loader.load_image_async(primary_url, on_primary_ready)
 
     def _next_page(self):
+        if self._chapter_end_visible():
+            # Past the end card: the next "page" is the next chapter.
+            self._go_to_chapter(1)
+            return
         # Step by what the current view actually covers: two pages normally,
         # one when a spread is on screen.
         step = self._page_step if self._mode == "paged" else 1
@@ -1316,6 +1459,9 @@ class ReaderView(Gtk.Box):
             self._on_chapter_finished()
 
     def _prev_page(self):
+        if self._chapter_end_visible():
+            self._hide_chapter_end()
+            return
         if self._current_page <= 0:
             return
         if self._mode == "paged" and self._effective_layout() == "double":
@@ -1335,8 +1481,13 @@ class ReaderView(Gtk.Box):
         width = self._paged_overlay.get_width()
         if width <= 0:
             return
+        height = self._paged_overlay.get_height() or 1
         action = reader_logic.tap_action(
-            x / width, self._direction == ReadingDirection.RTL, self._tap_invert
+            x / width,
+            self._direction == ReadingDirection.RTL,
+            self._tap_invert,
+            layout=self._tap_layout,
+            y_fraction=y / height,
         )
         if action == "next":
             self._next_page()
@@ -1356,6 +1507,9 @@ class ReaderView(Gtk.Box):
 
     def _on_webtoon_page(self, idx):
         """Webtoon equivalent of _show_page's bookkeeping, minus the drawing."""
+        if idx < len(self._pages) - 1 and self._chapter_end_visible():
+            # Scrolled back up from the end: the reader is staying.
+            self._hide_chapter_end()
         self._current_page = idx
         self._update_page_label(idx)
         self._save_progress(idx)
@@ -1372,13 +1526,122 @@ class ReaderView(Gtk.Box):
             self._show_page(idx)
 
     def _on_chapter_finished(self):
-        """All pages read — mark chapter as read."""
+        """
+        All pages read: mark the chapter read and show the end card.
+
+        The next chapter no longer opens straight away. Like Android's
+        transition page, one more "next" (tap, key or the button) moves on,
+        and "previous" or Stay keeps reading this one.
+        """
         if self._chapter and self._chapter.id:
             if not getattr(self._chapter, 'read', False):
                 self._db.mark_chapter_read(self._chapter.id, len(self._pages) - 1)
                 self._chapter.read = True
-            
-            self._go_to_next_chapter()
+        self._show_chapter_end()
+
+    def _build_chapter_end_card(self):
+        card = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
+        card.add_css_class("card")
+        card.add_css_class("reader-end-card")
+        card.set_halign(Gtk.Align.CENTER)
+        card.set_valign(Gtk.Align.CENTER)
+        for side in ("start", "end", "top", "bottom"):
+            getattr(card, f"set_margin_{side}")(24)
+
+        heading = Gtk.Label(label="Finished")
+        heading.add_css_class("dim-label")
+        card.append(heading)
+        self._end_finished_label = Gtk.Label()
+        self._end_finished_label.add_css_class("title-3")
+        self._end_finished_label.set_wrap(True)
+        self._end_finished_label.set_justify(Gtk.Justification.CENTER)
+        card.append(self._end_finished_label)
+        self._end_next_label = Gtk.Label()
+        self._end_next_label.set_wrap(True)
+        self._end_next_label.set_justify(Gtk.Justification.CENTER)
+        card.append(self._end_next_label)
+
+        buttons = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        buttons.set_halign(Gtk.Align.CENTER)
+        buttons.set_margin_top(8)
+        stay_btn = Gtk.Button(label="Stay")
+        stay_btn.connect("clicked", lambda *_: self._hide_chapter_end())
+        buttons.append(stay_btn)
+        self._end_next_btn = Gtk.Button(label="Next Chapter")
+        self._end_next_btn.add_css_class("suggested-action")
+        self._end_next_btn.connect("clicked", lambda *_: self._go_to_chapter(1))
+        buttons.append(self._end_next_btn)
+        card.append(buttons)
+
+        card.set_visible(False)
+        self._chapter_end_card = card
+        return card
+
+    def _show_chapter_end(self):
+        nxt = None
+        if self._manga and self._manga.id and self._chapter:
+            nxt = reader_logic.adjacent_chapter(
+                self._db.get_chapters(self._manga.id), self._chapter, 1
+            )
+        self._end_finished_label.set_text(reader_logic.chapter_label(self._chapter))
+        if nxt is None:
+            self._end_next_label.set_text("No more chapters")
+            self._end_next_btn.set_sensitive(False)
+        else:
+            self._end_next_label.set_text(f"Next: {reader_logic.chapter_label(nxt)}")
+            self._end_next_btn.set_sensitive(True)
+        self._chapter_end_card.set_visible(True)
+
+    def _hide_chapter_end(self):
+        if hasattr(self, "_chapter_end_card"):
+            self._chapter_end_card.set_visible(False)
+
+    def _chapter_end_visible(self) -> bool:
+        return hasattr(self, "_chapter_end_card") and self._chapter_end_card.get_visible()
+
+    # ── Extra navigation ─────────────────────────────────────────────────
+
+    def _scroll_or_turn(self, direction: int):
+        """Page Down/Up: scroll a webtoon by a screen, turn a page otherwise."""
+        if self._mode == "webtoon":
+            adj = self._webtoon_view.get_vadjustment()
+            adj.set_value(adj.get_value() + direction * adj.get_page_increment())
+        elif direction > 0:
+            self._next_page()
+        else:
+            self._prev_page()
+
+    def _jump_to_page(self, idx):
+        if not self._pages:
+            return
+        idx = max(0, min(idx, len(self._pages) - 1))
+        self._hide_chapter_end()
+        if self._mode == "webtoon":
+            self._webtoon_view.scroll_to_page(idx)
+        else:
+            self._show_page(idx)
+
+    def _on_paged_wheel(self, controller, dx, dy):
+        if not self._wheel_turns or self._mode != "paged" or not self._pages:
+            return False
+        view = self._double_page_view if self._effective_layout() == "double" else self._page_view
+        adj = view.get_vadjustment()
+        at_start = adj.get_value() <= 0.5
+        at_end = adj.get_value() + adj.get_page_size() >= adj.get_upper() - 0.5
+        action = reader_logic.wheel_turn(dy, at_start, at_end)
+        if action is None:
+            return False
+        # One turn per wheel gesture: a touchpad sends a stream of small
+        # deltas, and each would otherwise skip a page.
+        now = time.monotonic()
+        if now - self._last_wheel_turn < 0.35:
+            return True
+        self._last_wheel_turn = now
+        if action == "next":
+            self._next_page()
+        else:
+            self._prev_page()
+        return True
 
     def _go_to_next_chapter(self):
         self._go_to_chapter(1)
@@ -1500,6 +1763,32 @@ class ReaderView(Gtk.Box):
             return
         self._tap_invert = btn.get_active()
         self._persist_reader_setting("reader_tap_invert", "1" if self._tap_invert else "0")
+
+    _TAP_LAYOUT_NAMES = {
+        "standard": "Standard",
+        "kindle": "Kindle",
+        "edges": "Edges",
+        "off": "Off",
+    }
+
+    def _set_tap_layout(self, dropdown, *_):
+        if self._syncing_prefs:
+            return
+        self._tap_layout = reader_logic.TAP_LAYOUTS[dropdown.get_selected()]
+        self._persist_reader_setting("reader_tap_layout", self._tap_layout)
+
+    def _set_wheel_turns(self, btn):
+        if self._syncing_prefs:
+            return
+        self._wheel_turns = btn.get_active()
+        self._persist_reader_setting("reader_wheel_turns", "1" if self._wheel_turns else "0")
+
+    def _set_webtoon_padding(self, dropdown, *_):
+        if self._syncing_prefs:
+            return
+        self._webtoon_padding = reader_logic.WEBTOON_PADDINGS[dropdown.get_selected()]
+        self._persist_reader_setting("reader_webtoon_padding", str(self._webtoon_padding))
+        self._webtoon_view.set_padding(self._webtoon_padding)
 
     def _set_show_slider(self, btn):
         if self._syncing_prefs:

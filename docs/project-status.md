@@ -68,7 +68,12 @@ What Mihon Linux can do today, how it got here, and what is still open.
   - Only strips near the one being read hold an image, which keeps long chapters light on memory.
   - Progress, history and tracker updates are saved as you scroll.
   - A chapter reopens at the strip you left.
-- **Taps:** the left and right thirds turn pages (direction-aware, with an invert option) and the middle shows or hides the menu. Taps do not block scrolling or dragging.
+- **Taps:** four layouts. Standard uses the left and right thirds to turn pages and the middle for the menu. Kindle puts the menu along the top third. Edges turns pages only from narrow side strips. Off makes every click open the menu. All are direction-aware with an invert option, and none block scrolling or dragging.
+- **Scroll wheel:** optionally turns pages in paged mode. A tall page scrolls first, and the page turns only once you scroll past its end. One wheel gesture turns one page.
+- **Loading spinner:** appears only when a page takes longer than 150 ms, so turning through cached pages never flashes it.
+- **End of chapter:** a card shows the chapter just finished and the next one. One more "next" (click, key or button) opens it; "previous" or **Stay** keeps reading.
+- **Webtoon side padding:** 0–50% of the window left empty at the sides, so strips do not stretch across a wide window.
+- **Keys:** arrows or `A`/`D` turn pages, `Page Up`/`Page Down` and `Space` scroll or page, `Backspace` goes back, `Home`/`End` jump to the first or last page, `N`/`P` change chapter, `+`/`-`/`0` zoom, `F`/`F11` toggle fullscreen, `Esc` closes.
 - **Chapters:** next and previous follow the source's own chapter order, so unnumbered chapters are not skipped. Buttons in the top bar, or `N` and `P`.
 - **Other settings:** background colour, crop borders, page slider, fullscreen, keep screen on.
 - **Downloads:** downloaded chapters are read from disk in both modes.
@@ -165,15 +170,14 @@ tests/               pytest suite
   - History restores only the last-read time per chapter.
   - The `.tachibk` format has no version field to validate against.
 - **Caching:** the cache ages are fixed (24 hours and 1 hour), with no setting. There is no ETag or `If-Modified-Since` support.
-- **Reader checks:** tap navigation was checked by calling its handler, not with real mouse input.
+- **Reader checks:** taps, keys and the scroll wheel were checked by calling their handlers in a real window, not with real mouse or keyboard input.
 - **No screenshots:** the README does not have any yet.
 
 ## What is left
 
 Roughly in order of value:
 
-1. **Reader, second batch:** a loading spinner only for pages that are not cached yet, tap-zone layouts (Kindle, Edge, disabled), more keyboard shortcuts, an end-of-chapter screen, a webtoon width limit on wide windows, and mouse-wheel page turns.
-2. **Bridge gaps**, fixed when a real extension needs them: per-image headers from `fetchImage()`, sources that load pages one by one, `android.text.format.DateFormat`, and a coroutines bridge for newer extensions.
-3. **Smaller features:** an Upcoming view, an adaptive layout for narrow windows, a scheduled tracker pull, Security and Privacy settings, and README screenshots.
-4. **Housekeeping:** move the workflows to `actions/checkout@v5` before Node 20 support ends, and check CI when `ubuntu-latest` moves to Ubuntu 26 on 19 October 2026.
-5. **Lower value:** image filters (colour profiles, background matching, OLED black trimming) and animated page transitions.
+1. **Bridge gaps**, fixed when a real extension needs them: per-image headers from `fetchImage()`, sources that load pages one by one, `android.text.format.DateFormat`, and a coroutines bridge for newer extensions.
+2. **Smaller features:** an Upcoming view, an adaptive layout for narrow windows, a scheduled tracker pull, Security and Privacy settings, and README screenshots.
+3. **Housekeeping:** move the workflows to `actions/checkout@v5` before Node 20 support ends, and check CI when `ubuntu-latest` moves to Ubuntu 26 on 19 October 2026.
+4. **Lower value:** image filters (colour profiles, background matching, OLED black trimming) and animated page transitions.

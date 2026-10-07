@@ -50,6 +50,11 @@ tagged release yet, so everything lives under **Unreleased**.
 - Download queue controls: cancel, retry, remove, reorder, and move to front;
   configurable download location and worker count.
 - Refresh button on the manga page to fetch details and chapters on demand.
+- Reader: tap-zone layouts (Standard, Kindle, Edges, Off), optional scroll-wheel
+  page turns, an end-of-chapter card before moving to the next chapter, a loading
+  spinner shown only for pages that are not cached, webtoon side padding, and
+  keys for Page Up/Down, Backspace, Home/End, zoom (`+`/`-`/`0`) and fullscreen
+  (`F`/`F11`).
 - Scheduled background library updates (Smart Updates), with per-category
   exclusion.
 - Checkbox multi-select for chapter batch actions.

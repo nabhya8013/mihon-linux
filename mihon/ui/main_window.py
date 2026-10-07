@@ -1454,8 +1454,12 @@ class MainWindow(Adw.ApplicationWindow):
 
         reader_group = Gtk.ShortcutsGroup(title="Reader")
         for title, accelerator in (
-            ("Next page", "Right space"),
-            ("Previous page", "Left BackSpace"),
+            ("Next page (direction-aware)", "Right d space Page_Down"),
+            ("Previous page (direction-aware)", "Left a BackSpace Page_Up"),
+            ("First / last page", "Home End"),
+            ("Next / previous chapter", "n p"),
+            ("Zoom in / out / reset", "plus minus 0"),
+            ("Toggle fullscreen", "f F11"),
             ("Close the reader", "Escape"),
         ):
             reader_group.add_shortcut(

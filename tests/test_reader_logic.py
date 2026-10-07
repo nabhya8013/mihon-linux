@@ -114,5 +114,80 @@ class ChapterOrderTests(unittest.TestCase):
         self.assertEqual(rl.adjacent_chapter(chapters, stray, 1).id, 2)
 
 
+
+class TapLayoutTests(unittest.TestCase):
+    def test_standard_layout_is_the_default(self):
+        self.assertEqual(rl.tap_action(0.9, rtl=False), rl.tap_action(0.9, rtl=False, layout="standard"))
+
+    def test_kindle_top_band_opens_menu(self):
+        self.assertEqual(rl.tap_action(0.9, rtl=False, layout="kindle", y_fraction=0.1), "menu")
+
+    def test_kindle_big_right_side_goes_forward_in_ltr(self):
+        self.assertEqual(rl.tap_action(0.5, rtl=False, layout="kindle", y_fraction=0.6), "next")
+        self.assertEqual(rl.tap_action(0.2, rtl=False, layout="kindle", y_fraction=0.6), "prev")
+
+    def test_edges_only_turn_at_the_sides(self):
+        self.assertEqual(rl.tap_action(0.05, rtl=False, layout="edges"), "prev")
+        self.assertEqual(rl.tap_action(0.95, rtl=False, layout="edges"), "next")
+        self.assertEqual(rl.tap_action(0.25, rtl=False, layout="edges"), "menu")
+
+    def test_off_never_turns(self):
+        for x in (0.0, 0.5, 1.0):
+            self.assertEqual(rl.tap_action(x, rtl=True, layout="off"), "menu")
+
+    def test_rtl_and_invert_apply_to_every_layout(self):
+        self.assertEqual(rl.tap_action(0.05, rtl=True, layout="edges"), "next")
+        self.assertEqual(rl.tap_action(0.05, rtl=True, invert=True, layout="edges"), "prev")
+
+
+class WebtoonPaddingTests(unittest.TestCase):
+    def test_no_padding_is_full_width(self):
+        self.assertEqual(rl.webtoon_strip_width(1000), 1000)
+
+    def test_padding_narrows_the_strip(self):
+        self.assertEqual(rl.webtoon_strip_width(1000, padding_percent=40), 600)
+
+    def test_zoom_applies_on_top_of_padding(self):
+        self.assertEqual(rl.webtoon_strip_width(1000, zoom=0.5, padding_percent=20), 400)
+
+    def test_padding_is_capped(self):
+        self.assertEqual(rl.webtoon_strip_width(1000, padding_percent=500), 100)
+
+    def test_no_view_no_width(self):
+        self.assertEqual(rl.webtoon_strip_width(0, padding_percent=10), 0)
+
+
+class WheelTurnTests(unittest.TestCase):
+    def test_tall_page_scrolls_before_turning(self):
+        self.assertIsNone(rl.wheel_turn(1, at_start=True, at_end=False))
+        self.assertIsNone(rl.wheel_turn(-1, at_start=False, at_end=True))
+
+    def test_turns_at_the_end_it_is_scrolling_towards(self):
+        self.assertEqual(rl.wheel_turn(1, at_start=False, at_end=True), "next")
+        self.assertEqual(rl.wheel_turn(-1, at_start=True, at_end=False), "prev")
+
+    def test_page_that_fits_turns_both_ways(self):
+        self.assertEqual(rl.wheel_turn(1, True, True), "next")
+        self.assertEqual(rl.wheel_turn(-1, True, True), "prev")
+
+    def test_zero_delta_does_nothing(self):
+        self.assertIsNone(rl.wheel_turn(0, True, True))
+
+
+class ChapterLabelTests(unittest.TestCase):
+    def test_numbered(self):
+        self.assertEqual(rl.chapter_label(NS(chapter_number=12.0, title="")), "Chapter 12")
+        self.assertEqual(rl.chapter_label(NS(chapter_number=12.5, title="")), "Chapter 12.5")
+
+    def test_numbered_with_real_title(self):
+        self.assertEqual(rl.chapter_label(NS(chapter_number=3.0, title="The Storm")), "Chapter 3: The Storm")
+
+    def test_title_that_repeats_the_number_is_not_doubled(self):
+        self.assertEqual(rl.chapter_label(NS(chapter_number=3.0, title="Chapter 3")), "Chapter 3")
+
+    def test_unnumbered_uses_title(self):
+        self.assertEqual(rl.chapter_label(NS(chapter_number=-1.0, title="Extra")), "Extra")
+        self.assertEqual(rl.chapter_label(NS(chapter_number=-1.0, title="")), "Untitled chapter")
+
 if __name__ == "__main__":
     unittest.main()

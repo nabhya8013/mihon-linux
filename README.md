@@ -42,8 +42,13 @@ _Not yet added._
     chapter reopening where you left off
   - Previous/next chapter in the source's own order, so unnumbered chapters are not
     skipped
-  - Click the left or right third to turn pages and the middle for the menu, without
-    blocking the mouse wheel
+  - Tap zones: Standard (left/right thirds), Kindle (menu along the top), Edges
+    (narrow side strips) or Off, without blocking the mouse wheel. Optionally the
+    scroll wheel turns pages once a page is scrolled to its end
+  - A loading spinner appears only when a page is not cached yet
+  - An end-of-chapter card ("Finished Chapter 2 · Next: Chapter 3") instead of jumping
+    straight into the next chapter
+  - Webtoon side padding, so strips do not stretch across a wide window
 - **Downloads**: queue with cancel, retry, remove, reorder and move-to-front, a
   configurable folder and number of parallel downloads; downloaded chapters read
   from disk in both reader modes
@@ -67,7 +72,9 @@ _Not yet added._
 - **Keyboard shortcuts**: `Ctrl+K` or `/` global search, `Ctrl+R` / `F5` refresh,
   `Ctrl+1`–`Ctrl+5` tabs, `Ctrl+W` back, `Ctrl+?` for the full list. In the reader:
   arrow keys or `A`/`D` turn pages (following the reading direction), `W`/`S`/`Space`
-  scroll or page, `N`/`P` next and previous chapter, `Esc` closes
+  and `Page Up`/`Page Down` scroll or page, `Backspace` goes back, `Home`/`End` jump to
+  the first or last page, `N`/`P` next and previous chapter, `+`/`-`/`0` zoom, `F` or
+  `F11` fullscreen, `Esc` closes
 - **Drag and drop**: drop an APK onto the Extensions tab to install it, drag category
   rows to reorder them
 - **Tracking**: two-way sync with AniList and MyAnimeList. Reading past 85% of a

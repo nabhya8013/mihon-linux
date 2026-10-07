@@ -22,24 +22,110 @@ def clamp_zoom(zoom: float) -> float:
     return max(ZOOM_MIN, min(ZOOM_MAX, zoom))
 
 
-def tap_action(x_fraction: float, rtl: bool, invert: bool = False) -> str:
-    """
-    Map a click's horizontal position to "prev", "next" or "menu".
+TAP_LAYOUTS = ("standard", "kindle", "edges", "off")
 
-    The screen splits into thirds. The middle toggles the menu. The outer
-    thirds turn pages, the left one going forward when reading right to left,
-    as on Android; ``invert`` swaps the two.
+# Width of each page-turn strip in the "edges" layout.
+EDGE_FRACTION = 0.15
+
+
+def tap_side(x_fraction: float, y_fraction: float = 0.5, layout: str = "standard") -> str:
     """
+    Which zone a click lands in: "left", "right" or "menu".
+
+    - standard: thirds across the page, the middle opens the menu.
+    - kindle: the top third opens the menu; below it, the left third is one
+      side and everything else the other, so the larger target turns forward
+      in left-to-right reading.
+    - edges: narrow strips at each side turn pages; the rest opens the menu,
+      for readers who mostly click to pan or select.
+    - off: every click opens the menu.
+    """
+    if layout == "off":
+        return "menu"
+    if layout == "kindle":
+        if y_fraction < 1 / 3:
+            return "menu"
+        return "left" if x_fraction < 1 / 3 else "right"
+    if layout == "edges":
+        if x_fraction < EDGE_FRACTION:
+            return "left"
+        if x_fraction > 1 - EDGE_FRACTION:
+            return "right"
+        return "menu"
     if x_fraction < 1 / 3:
-        side = "left"
-    elif x_fraction > 2 / 3:
-        side = "right"
-    else:
+        return "left"
+    if x_fraction > 2 / 3:
+        return "right"
+    return "menu"
+
+
+def tap_action(
+    x_fraction: float,
+    rtl: bool,
+    invert: bool = False,
+    layout: str = "standard",
+    y_fraction: float = 0.5,
+) -> str:
+    """
+    Map a click's position to "prev", "next" or "menu".
+
+    The side that goes forward is the left one when reading right to left, as
+    on Android; ``invert`` swaps the two sides.
+    """
+    side = tap_side(x_fraction, y_fraction, layout)
+    if side == "menu":
         return "menu"
     forward_side = "left" if rtl else "right"
     if invert:
         forward_side = "right" if forward_side == "left" else "left"
     return "next" if side == forward_side else "prev"
+
+
+WEBTOON_PADDINGS = (0, 10, 20, 30, 40, 50)
+
+
+def webtoon_strip_width(view_w: int, zoom: float = 1.0, padding_percent: int = 0) -> int:
+    """
+    Width to draw webtoon strips at.
+
+    ``padding_percent`` is the share of the window left empty, split evenly
+    between the two sides, so strips do not stretch across a wide desktop
+    window. Zoom applies on top.
+    """
+    if view_w <= 0:
+        return 0
+    padding = max(0, min(90, padding_percent)) / 100
+    return max(1, round(view_w * (1 - padding) * clamp_zoom(zoom)))
+
+
+def wheel_turn(delta_y: float, at_start: bool, at_end: bool) -> Optional[str]:
+    """
+    Whether a scroll-wheel step should turn the page in paged mode.
+
+    A page taller than the window scrolls first; the wheel only turns the
+    page once the view is already at that end. Returns "next", "prev" or
+    None (let the view scroll).
+    """
+    if delta_y > 0 and at_end:
+        return "next"
+    if delta_y < 0 and at_start:
+        return "prev"
+    return None
+
+
+def chapter_label(chapter) -> str:
+    """Short name for a chapter: "Chapter 12", "Chapter 12.5", or its title."""
+    if chapter is None:
+        return ""
+    number = getattr(chapter, "chapter_number", -1)
+    title = (getattr(chapter, "title", "") or "").strip()
+    if number is not None and number >= 0:
+        label = f"Chapter {number:g}"
+        # Keep a real title, but not one that only repeats the number.
+        if title and title.lower() != label.lower():
+            return f"{label}: {title}"
+        return label
+    return title or "Untitled chapter"
 
 
 def fit_sizes(
@@ -157,6 +243,13 @@ def adjacent_chapter(chapters: Sequence, current, step: int) -> Optional[object]
 
 __all__ = [
     "DEFAULT_STRIP_RATIO",
+    "EDGE_FRACTION",
+    "TAP_LAYOUTS",
+    "WEBTOON_PADDINGS",
+    "chapter_label",
+    "tap_side",
+    "webtoon_strip_width",
+    "wheel_turn",
     "ZOOM_MAX",
     "ZOOM_MIN",
     "adjacent_chapter",
