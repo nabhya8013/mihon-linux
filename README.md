@@ -3,7 +3,7 @@
 Native GTK4/Libadwaita manga reader for Linux, inspired by
 [Mihon](https://github.com/mihonapp/mihon)/Tachiyomi.
 
-> **Status:** early, actively developed. Three built-in sources plus a JVM bridge for
+> **Status:** early, actively developed. Four built-in sources (three online, one local) plus a JVM bridge for
 > Tachiyomi-style APK extensions. See [`docs/parity-workflow.md`](docs/parity-workflow.md)
 > for the roadmap toward Android feature parity.
 
@@ -38,7 +38,7 @@ _Not yet added._
   filter sheet in the source catalog, and the edited state is sent back to the
   source on search
 - **`.tachibk` import/export**: restore an Android Mihon backup (library, categories,
-  chapter metadata) and write one back out from *More → Data*. Source IDs use
+  chapter metadata) and write one back out from *More → Downloads and Data*. Source IDs use
   upstream's hash, so backups move in both directions
 - **Anti-bot layer**: browser-grade TLS via `curl_cffi`, a WebKit challenge-solver
   window for Cloudflare/DDoS-Guard, and a persistent cookie jar shared between the
@@ -76,7 +76,7 @@ bridge/           # standalone Kotlin JSON-RPC bridge for APK/JVM extensions
 
 Application data lives under `~/.local/share/mihon-linux/` (SQLite DB, covers,
 `page-cache/`, downloads, `logs/`, `cookies.json`). Covers are kept; cached chapter
-pages are pruned once they pass 512 MB, and can be cleared from *More → Data*.
+pages are pruned once they pass 512 MB, and can be cleared from *More → Downloads and Data*.
 
 ## Requirements
 
@@ -180,7 +180,7 @@ The automated pytest suite is under `tests/` (`python -m pytest tests/`).
 
 ## Local Source
 
-Point *More → Local source* at a folder laid out one directory per series:
+Point *More → Sources → Local source* at a folder laid out one directory per series:
 
 ```text
 ~/Manga/
@@ -262,10 +262,10 @@ build of the bridge JAR. Tagging `v*` builds a release with a generated changelo
 | `Failed to initialize GTK window` / app exits immediately | Run inside a graphical session — `DISPLAY` or `WAYLAND_DISPLAY` must be set. |
 | `./gradlew jar` fails with a JRE / "no compiler" error | Install a full JDK 21, not just the JRE, and point `JAVA_HOME` at it. |
 | App does not appear in the application menu | Run `scripts/install-desktop-files.sh`, then log out and back in. |
-| Disk usage growing under `~/.local/share/mihon-linux` | Clear the page cache from *More → Data*. Downloads and covers are kept. |
+| Disk usage growing under `~/.local/share/mihon-linux` | Clear the page cache from *More → Downloads and Data*. Downloads and covers are kept. |
 | Tracking says "Client ID needed" | Register an API client and paste its ID in *More → Tracking* (see *Tracking Setup*). |
 | Tracker updates stuck in "waiting" | Check you are still logged in, then press **Retry now** in *More → Tracking*. |
-| Local series not showing up | Check the folder in *More → Local source*, then press **Rescan**. Each series needs its own subfolder. |
+| Local series not showing up | Check the folder in *More → Sources → Local source*, then press **Rescan**. Each series needs its own subfolder. |
 | A `.cbr`/`.rar` chapter has no pages | Install the `rarfile` package and an unrar-compatible tool (`unrar`, `unar`, or `bsdtar`), then check the log for which one is still missing. |
 
 ## Notes

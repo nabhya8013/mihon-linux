@@ -29,6 +29,29 @@ tagged release yet, so everything lives under **Unreleased**.
 - Per-source preferences and source-defined search filters exposed over the
   bridge.
 - Central logging configuration writing to `~/.local/share/mihon-linux/logs/`.
+- MIT `LICENSE`, `NOTICE` crediting Mihon/Tachiyomi, GitHub Actions CI and release
+  workflows, and Flatpak packaging metadata (not yet buildable: Python dependencies
+  need hash-pinning with `flatpak-pip-generator`).
+- `.tachibk` export alongside import, using upstream-compatible source IDs.
+- Disk-backed page cache (512 MB bound) and cover cache, with a prefetch window,
+  landscape spread detection, and seamless webtoon stitching in the reader.
+- Local source: CBZ/ZIP archives and image folders, plus CBR/RAR via the optional
+  `rarfile` package and an unrar-compatible tool.
+- Tracking: AniList and MyAnimeList OAuth, two-way sync, 85% read-progress
+  threshold, retry queue, and keyring token storage.
+- Global search across all sources in parallel, with per-source results and timeout.
+- Source filter sheet built from Tachiyomi `FilterList`.
+- Library presenter, toast notifications, and desktop notifications for
+  background events.
+- Keyboard shortcuts (`Ctrl+K`, `Ctrl+R`/`F5`, `Ctrl+1`–`Ctrl+5`, `Ctrl+?`) and
+  drag and drop for APK install and category reorder.
+- Download queue controls: cancel, retry, remove, reorder, and move to front;
+  configurable download location and worker count.
+- Scheduled background library updates (Smart Updates), with per-category
+  exclusion.
+- Checkbox multi-select for chapter batch actions.
+- System/Light/Dark appearance setting.
+- Notification of tracker retry queue results at startup.
 
 ### Changed
 
@@ -45,10 +68,14 @@ tagged release yet, so everything lives under **Unreleased**.
   full popular → search → details → chapters → pages → image chain.
 - Uninstalling an extension removes its files instead of only unregistering it
   in memory.
-- Built-in sources reduced to MangaDex and AllManga; the MangaFire stub was
-  never functional and is no longer registered.
+- The *More* panel is split into dedicated Settings pages: Reader, Appearance,
+  Library, Downloads and Data, Sources, Tracking, About.
+- Registered sources are filtered to English by default.
+- App icon replaced with the new circular logo.
 
-### Pending
+### Fixed
 
-- `LICENSE` file — license not yet chosen (Apache 2.0 recommended to match upstream
-  Mihon/Tachiyomi).
+- MangaFire crash, AllAnime auth, and a dead logger.
+- Dead Settings controls in the More panel are wired up.
+- A local cover cache path is no longer passed to the HTTP fetcher.
+- CI dependency install and missing `gi`/`protobuf` in the Python tests.

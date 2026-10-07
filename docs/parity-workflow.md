@@ -10,16 +10,16 @@ Related docs:
 
 | Epic | Status |
 |---|---|
-| 1) Browse Parity | Partial — Sources + Migrate tab shipped (`src:`/`id:` queries); async global search and an Extensions/repo surface pending |
+| 1) Browse Parity | **Done** — Sources, Extensions (repo browse/install/update), and Migrate tabs; concurrent global search with `src:`/`id:` queries |
 | 2) Advanced Library Controls | **Done** — `4ad2f20` |
 | 3) Category Management UI | **Done** — `e3451e3` |
-| 4) Manga Detail Parity | Partial — detail, chapter list, and a manual tracking form exist; tracker OAuth/auto-sync and chapter batch actions pending |
-| 5) Reader Advanced Settings | Partial — paged + webtoon, persisted direction/layout/scale/crop-borders; tap-zone and per-mode depth pending |
-| 6) Smart Updates and Upcoming | Not started — manual Updates tab only |
-| 7) Download Manager Parity | Partial — `DownloadManager` core exists; queue-management UI (pause/resume/reorder/retry) pending |
-| 8) Full Settings Parity | Partial — single More panel with grouped rows; dedicated screens, `.tachibk` export, backup/restore screen pending |
+| 4) Manga Detail Parity | **Done** — detail, chapter list with sort modes, checkbox multi-select batch actions, AniList/MAL tracking with two-way sync |
+| 5) Reader Advanced Settings | Partial — paged, double-page, and webtoon modes; persisted direction/layout/scale/crop-borders/background/keep-screen-on; tap zones and per-mode depth pending |
+| 6) Smart Updates and Upcoming | Partial — scheduled background updates, per-category exclusion, skip-dropped, desktop notifications shipped; Upcoming view pending |
+| 7) Download Manager Parity | **Done** — queue UI with cancel/retry/remove, reorder and move-to-front priority, download location and worker count settings |
+| 8) Full Settings Parity | Partial — dedicated Settings pages (Reader, Appearance, Library, Downloads and Data, Sources, Tracking, About) and `.tachibk` import/export shipped; Backup/Restore screen, import conflict resolution, and Security/Privacy pending |
 
-Sprint 0 (anti-bot) and `.tachibk` import are tracked separately in
+Sprint 0 (anti-bot), `.tachibk` import/export, tracking, and local source are tracked separately in
 `PORT_PARITY_IMPLEMENTATION_LOG.md` (repo root, local-only) — all shipped.
 
 ## Core Delivery Pattern (Use For Every Epic)
