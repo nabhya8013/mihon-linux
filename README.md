@@ -53,7 +53,14 @@ _Not yet added._
   configurable folder and number of parallel downloads; downloaded chapters read
   from disk in both reader modes
 - **Smart updates**: library checks on startup and every 6, 12 or 24 hours, skipping
-  dropped series and excluded categories, with desktop notifications
+  dropped series and excluded categories, with desktop notifications. After a
+  scheduled check, tracker changes made elsewhere (status, score, progress) are pulled
+  in too
+- **Upcoming**: the Updates tab can switch to *Upcoming*, which predicts each series'
+  next chapter from its release rhythm and lists them by day. Late series show as
+  *Due now*; finished series and ones that look paused are left out
+- **Incognito mode**: one switch at the top of *More*. While it is on, reading leaves
+  no history, saved page, read mark or tracker update
 - **APK extension bridge**: loads Tachiyomi/Mihon `.apk` extensions through a Kotlin
   JVM process (see [`bridge/README.md`](bridge/README.md))
 - **Source filters**: sources that expose a Tachiyomi `FilterList` (genre groups,

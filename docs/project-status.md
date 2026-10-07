@@ -81,7 +81,8 @@ What Mihon Linux can do today, how it got here, and what is still open.
 ### Updates, downloads and history
 
 - **Updates tab:** checks every library manga, records new chapters, and recalculates unread counts.
-- **Scheduled updates:** run on startup and every 6, 12 or 24 hours. They can skip dropped series and excluded categories, and post a desktop notification.
+- **Scheduled updates:** run on startup and every 6, 12 or 24 hours. They can skip dropped series and excluded categories, and post a desktop notification. Afterwards, tracked library manga are pulled from the trackers you are logged in to.
+- **Upcoming:** the Updates tab switches between *Updates* and *Upcoming*. Upcoming predicts each series' next chapter from its release rhythm: chapters released the same day count once, the interval is the median of the last few gaps, and finished, irregular or apparently paused series are left out. Late series are listed under *Due now*. The rules are in `mihon/core/upcoming.py`.
 - **Download queue:** cancel, retry, remove, reorder and move to front, with configurable location and number of parallel downloads.
 - **History tab:** recently read chapters.
 
@@ -108,6 +109,7 @@ What Mihon Linux can do today, how it got here, and what is still open.
 
 ### Settings and desktop integration
 
+- **Incognito mode:** a switch at the top of *More*. While it is on, the reader saves no history, page, read mark or tracker update, and its title says *Incognito*.
 - **Settings pages:** Reader, Appearance, Library, Downloads and Data, Backup and Restore, Sources, Tracking, About.
 - **Appearance:** System, Light or Dark.
 - **Notifications:** toasts inside the app, desktop notifications for background events.
@@ -178,6 +180,6 @@ tests/               pytest suite
 Roughly in order of value:
 
 1. **Bridge gaps**, fixed when a real extension needs them: per-image headers from `fetchImage()`, sources that load pages one by one, `android.text.format.DateFormat`, and a coroutines bridge for newer extensions.
-2. **Smaller features:** an Upcoming view, an adaptive layout for narrow windows, a scheduled tracker pull, Security and Privacy settings, and README screenshots.
-3. **Housekeeping:** move the workflows to `actions/checkout@v5` before Node 20 support ends, and check CI when `ubuntu-latest` moves to Ubuntu 26 on 19 October 2026.
+2. **Smaller features:** an adaptive layout for narrow windows, an app lock, and README screenshots.
+3. **Housekeeping:** check CI when `ubuntu-latest` moves to Ubuntu 26 on 19 October 2026. (The workflows already run on the Node 24 action versions.)
 4. **Lower value:** image filters (colour profiles, background matching, OLED black trimming) and animated page transitions.

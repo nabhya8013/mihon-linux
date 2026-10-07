@@ -50,6 +50,12 @@ tagged release yet, so everything lives under **Unreleased**.
 - Download queue controls: cancel, retry, remove, reorder, and move to front;
   configurable download location and worker count.
 - Refresh button on the manga page to fetch details and chapters on demand.
+- Upcoming view in the Updates tab: next-chapter predictions from each series'
+  release rhythm, grouped by day.
+- Incognito mode (*More*): reading records no history, page, read mark or tracker
+  update while it is on.
+- Tracker pull after scheduled library updates, so changes made on AniList or
+  MyAnimeList arrive without opening each manga (*More → Tracking*, on by default).
 - Reader: tap-zone layouts (Standard, Kindle, Edges, Off), optional scroll-wheel
   page turns, an end-of-chapter card before moving to the next chapter, a loading
   spinner shown only for pages that are not cached, webtoon side padding, and
@@ -62,6 +68,10 @@ tagged release yet, so everything lives under **Unreleased**.
 - Notification of tracker retry queue results at startup.
 
 ### Changed
+
+- CI and release workflows moved to the Node 24 versions of their actions
+  (`checkout@v7`, `setup-python@v7`, `setup-java@v6`, `cache@v6`,
+  `upload-artifact@v7`, `action-gh-release@v3`) ahead of Node 20's removal.
 
 - HTTP call sites (`downloader`, `image_loader`, `mangadex`, `allmanga`) now go
   through the shared `mihon.core.http_client` session factory; `requests` is only a

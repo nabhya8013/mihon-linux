@@ -15,9 +15,9 @@ Related docs:
 | 3) Category Management UI | **Done** — `e3451e3` |
 | 4) Manga Detail Parity | **Done** — detail, chapter list with sort modes, checkbox multi-select batch actions, AniList/MAL tracking with two-way sync |
 | 5) Reader Advanced Settings | Partial — paged, double-page, and webtoon modes; persisted direction/layout/scale/crop-borders/background/keep-screen-on; working zoom and fit-width; webtoon progress, resume and lazy loading; tap-zone layouts (Standard, Kindle, Edges, Off); scroll-wheel page turns; per-page loading spinner; end-of-chapter card; webtoon side padding; chapter navigation in source order; full keyboard control |
-| 6) Smart Updates and Upcoming | Partial — scheduled background updates, per-category exclusion, skip-dropped, desktop notifications shipped; Upcoming view pending |
+| 6) Smart Updates and Upcoming | **Done** — scheduled background updates, per-category exclusion, skip-dropped, desktop notifications, tracker pull after scheduled runs, and an Upcoming view with release predictions |
 | 7) Download Manager Parity | **Done** — queue UI with cancel/retry/remove, reorder and move-to-front priority, download location and worker count settings |
-| 8) Full Settings Parity | Partial — dedicated Settings pages (Reader, Appearance, Library, Downloads and Data, Backup and Restore, Sources, Tracking, About), `.tachibk` import/export with preview and merge/overwrite shipped; Security/Privacy pending |
+| 8) Full Settings Parity | Partial — dedicated Settings pages (Reader, Appearance, Library, Downloads and Data, Backup and Restore, Sources, Tracking, About), `.tachibk` import/export with preview and merge/overwrite shipped; incognito mode shipped; app lock pending |
 
 Sprint 0 (anti-bot), `.tachibk` import/export, tracking, and local source are tracked separately in
 `PORT_PARITY_IMPLEMENTATION_LOG.md` (repo root, local-only) — all shipped.
