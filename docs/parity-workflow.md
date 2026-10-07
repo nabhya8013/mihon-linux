@@ -17,7 +17,7 @@ Related docs:
 | 5) Reader Advanced Settings | Partial — paged, double-page, and webtoon modes; persisted direction/layout/scale/crop-borders/background/keep-screen-on; tap zones and per-mode depth pending |
 | 6) Smart Updates and Upcoming | Partial — scheduled background updates, per-category exclusion, skip-dropped, desktop notifications shipped; Upcoming view pending |
 | 7) Download Manager Parity | **Done** — queue UI with cancel/retry/remove, reorder and move-to-front priority, download location and worker count settings |
-| 8) Full Settings Parity | Partial — dedicated Settings pages (Reader, Appearance, Library, Downloads and Data, Sources, Tracking, About) and `.tachibk` import/export shipped; Backup/Restore screen, import conflict resolution, and Security/Privacy pending |
+| 8) Full Settings Parity | Partial — dedicated Settings pages (Reader, Appearance, Library, Downloads and Data, Backup and Restore, Sources, Tracking, About), `.tachibk` import/export with preview and merge/overwrite shipped; Security/Privacy pending |
 
 Sprint 0 (anti-bot), `.tachibk` import/export, tracking, and local source are tracked separately in
 `PORT_PARITY_IMPLEMENTATION_LOG.md` (repo root, local-only) — all shipped.

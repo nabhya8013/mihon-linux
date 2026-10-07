@@ -33,6 +33,8 @@ tagged release yet, so everything lives under **Unreleased**.
   workflows, and Flatpak packaging metadata (not yet buildable: Python dependencies
   need hash-pinning with `flatpak-pip-generator`).
 - `.tachibk` export alongside import, using upstream-compatible source IDs.
+- *More → Backup and Restore* page: restore previews the file first, offers Merge
+  or Overwrite for manga already present, and shows progress.
 - Disk-backed page cache (512 MB bound) and cover cache, with a prefetch window,
   landscape spread detection, and seamless webtoon stitching in the reader.
 - Local source: CBZ/ZIP archives and image folders, plus CBR/RAR via the optional
@@ -75,6 +77,10 @@ tagged release yet, so everything lives under **Unreleased**.
 
 ### Fixed
 
+- `.tachibk` import now restores chapters, read progress, and reading history. It
+  previously wrote only manga and categories, so every chapter came back unread.
+- Corrupt, empty, or non-backup files are rejected with a clear message instead of
+  a stack trace or a silent no-op.
 - MangaFire crash, AllAnime auth, and a dead logger.
 - Dead Settings controls in the More panel are wired up.
 - A local cover cache path is no longer passed to the HTTP fetcher.

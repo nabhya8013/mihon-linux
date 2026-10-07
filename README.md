@@ -37,9 +37,12 @@ _Not yet added._
   status selects, tri-state tags, sort order, free-text fields) get a native GTK
   filter sheet in the source catalog, and the edited state is sent back to the
   source on search
-- **`.tachibk` import/export**: restore an Android Mihon backup (library, categories,
-  chapter metadata) and write one back out from *More → Downloads and Data*. Source IDs use
-  upstream's hash, so backups move in both directions
+- **`.tachibk` import/export**: *More → Backup and Restore* writes a backup Android
+  Mihon can read and restores one with a preview first (manga, chapters, how many
+  already exist). Restore brings back chapters, read progress, categories and history,
+  with a **Merge** (keep local data, add what is missing; read never becomes unread) or
+  **Overwrite** choice and a progress bar. Restoring never removes manga or chapters.
+  Source IDs use upstream's hash, so backups move in both directions
 - **Anti-bot layer**: browser-grade TLS via `curl_cffi`, a WebKit challenge-solver
   window for Cloudflare/DDoS-Guard, and a persistent cookie jar shared between the
   Python app and the JVM bridge
