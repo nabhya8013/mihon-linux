@@ -77,6 +77,20 @@ tagged release yet, so everything lives under **Unreleased**.
 
 ### Fixed
 
+- Reader, webtoon mode: reading progress, history and tracker updates are now saved
+  as you scroll (previously only when the chapter ended), and a chapter reopens at
+  the saved strip instead of the top.
+- Reader, webtoon mode: strips load in a window around the one being read and
+  release their images when far away, instead of loading the whole chapter at once.
+  Each strip is sized from its own aspect ratio, so short strips are no longer
+  padded to 800 px and strips meet without seams. Downloaded chapters now load in
+  webtoon mode too.
+- Reader: the zoom control now zooms. Fit-width shows the page at full width and
+  scrolls, instead of stretching it to the window height.
+- Reader: page-turn taps no longer block the mouse wheel or dragging; a click that
+  turns into a drag does not turn the page.
+- Reader: next chapter follows the source's chapter order, so unnumbered chapters
+  are no longer skipped. Previous/next chapter buttons and `N`/`P` keys were added.
 - The Flatpak manifest now builds and runs: it targets the GNOME 50 runtime (47 is
   end-of-life), installs a sandbox launcher instead of the development `mihon.sh`,
   keeps the `mihon` package directory when copying, and pins all 56 Python
