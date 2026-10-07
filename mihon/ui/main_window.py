@@ -19,6 +19,7 @@ from .manga_detail import MangaDetailView
 from .reader import ReaderView
 from .challenge_solver import WebKitCookieSolver
 from ..core.database import get_db, DOWNLOADS_DIR
+from ..core.privacy import is_incognito, set_incognito
 from ..core.tracking import get_track_manager
 from ..extensions.repo_manager import get_repo_manager
 from .notify import notify, notify_error, notify_desktop
@@ -351,6 +352,19 @@ class MainWindow(Adw.ApplicationWindow):
         content.set_hexpand(True)
         content.set_halign(Gtk.Align.FILL)
 
+        # Incognito sits above the settings list, as on Android: it is a
+        # switch people flip while reading, not something to dig for.
+        privacy_group = Adw.PreferencesGroup()
+        content.append(privacy_group)
+        self._incognito_row = Adw.SwitchRow(
+            title="Incognito mode",
+            subtitle="Reading leaves no history, saved page or tracker update",
+        )
+        self._incognito_row.add_prefix(Gtk.Image.new_from_icon_name("view-conceal-symbolic"))
+        self._incognito_row.set_active(is_incognito(get_db()))
+        self._incognito_row.connect("notify::active", self._on_incognito_toggled)
+        privacy_group.add(self._incognito_row)
+
         settings_group = Adw.PreferencesGroup(title="Settings")
         content.append(settings_group)
 
@@ -375,6 +389,11 @@ class MainWindow(Adw.ApplicationWindow):
         scroll.set_child(content)
         box.append(scroll)
         return box
+
+    def _on_incognito_toggled(self, row, *_):
+        set_incognito(get_db(), row.get_active())
+        notify(self, "Incognito mode on: reading is not recorded" if row.get_active()
+               else "Incognito mode off")
 
     def _build_settings_page(self, title: str, builder_name: str) -> Adw.NavigationPage:
         section_content = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=16)
@@ -706,6 +725,19 @@ class MainWindow(Adw.ApplicationWindow):
         retry_btn.connect("clicked", self._on_retry_tracking_queue)
         self._tracking_queue_row.add_suffix(retry_btn)
         track_group.add(self._tracking_queue_row)
+
+        pull_row = Adw.SwitchRow(
+            title="Sync from trackers after scheduled updates",
+            subtitle="Bring in status, score and progress changed on AniList or MyAnimeList",
+        )
+        pull_row.set_active(get_db().get_setting("tracker_pull_after_update", "1") == "1")
+        pull_row.connect(
+            "notify::active",
+            lambda row, *_: get_db().set_setting(
+                "tracker_pull_after_update", "1" if row.get_active() else "0"
+            ),
+        )
+        track_group.add(pull_row)
 
         storage_row = Adw.ActionRow(title="Token storage")
         storage_label = Gtk.Label(label=getattr(manager, "credentials", None)

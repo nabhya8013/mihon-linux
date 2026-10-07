@@ -11,6 +11,7 @@ import time
 from ..core.database import get_db
 from ..core.models import Manga, Chapter, Page, ReadingDirection
 from ..core import image_loader, reader_logic
+from ..core.privacy import is_incognito
 from ..core.page_cache import (
     AUTO_DOUBLE_MIN_WIDTH,
     PageCache,
@@ -561,8 +562,15 @@ class ReaderView(Gtk.Box):
         )
         self._wheel_controller.set_propagation_phase(Gtk.PropagationPhase.CAPTURE)
         self._wheel_controller.connect("scroll", self._on_paged_wheel)
+        # A touchpad swipe arrives as begin, many small scrolls, end. One
+        # swipe should turn one page however long it lasts, so remember
+        # whether this gesture already turned.
+        self._wheel_controller.connect("scroll-begin", self._on_wheel_gesture_begin)
+        self._wheel_controller.connect("scroll-end", self._on_wheel_gesture_end)
         self._paged_overlay.add_controller(self._wheel_controller)
         self._last_wheel_turn = 0.0
+        self._wheel_gesture_active = False
+        self._wheel_gesture_turned = False
         self._reader_stack.add_named(self._paged_overlay, "paged")
 
         # Webtoon view
@@ -1097,10 +1105,29 @@ class ReaderView(Gtk.Box):
 
     def _setup_keyboard(self):
         controller = Gtk.EventControllerKey()
+        # Capture phase, so reader keys work wherever focus sits inside the
+        # reader, before a focused child's own key bindings can claim them.
+        # Popovers and Ctrl/Alt shortcuts are passed through below.
+        controller.set_propagation_phase(Gtk.PropagationPhase.CAPTURE)
         controller.connect("key-pressed", self._on_key_pressed)
         self.add_controller(controller)
 
+    def _focus_in_popover(self) -> bool:
+        """True while a settings popover has focus, so its own keys still work."""
+        root = self.get_root()
+        widget = root.get_focus() if root is not None else None
+        while widget is not None:
+            if isinstance(widget, Gtk.Popover):
+                return True
+            widget = widget.get_parent()
+        return False
+
     def _on_key_pressed(self, ctrl, keyval, keycode, state):
+        if self._focus_in_popover():
+            return False
+        if state & (Gdk.ModifierType.CONTROL_MASK | Gdk.ModifierType.ALT_MASK):
+            # Leave Ctrl/Alt shortcuts (Ctrl+W, Ctrl+?, ...) to the window.
+            return False
         if keyval in (Gdk.KEY_Right, Gdk.KEY_d, Gdk.KEY_D):
             if self._direction == ReadingDirection.RTL:
                 self._prev_page()
@@ -1172,6 +1199,8 @@ class ReaderView(Gtk.Box):
 
         ch_num = f"Ch.{chapter.chapter_number:g}" if chapter.chapter_number >= 0 else chapter.title
         self._chapter_title.set_title(manga.title)
+        if is_incognito(self._db):
+            ch_num = f"{ch_num} · Incognito"
         self._chapter_title.set_subtitle(ch_num)
         self._page_label.set_text("Loading...")
 
@@ -1533,7 +1562,7 @@ class ReaderView(Gtk.Box):
         transition page, one more "next" (tap, key or the button) moves on,
         and "previous" or Stay keeps reading this one.
         """
-        if self._chapter and self._chapter.id:
+        if self._chapter and self._chapter.id and not is_incognito(self._db):
             if not getattr(self._chapter, 'read', False):
                 self._db.mark_chapter_read(self._chapter.id, len(self._pages) - 1)
                 self._chapter.read = True
@@ -1621,6 +1650,13 @@ class ReaderView(Gtk.Box):
         else:
             self._show_page(idx)
 
+    def _on_wheel_gesture_begin(self, *_):
+        self._wheel_gesture_active = True
+        self._wheel_gesture_turned = False
+
+    def _on_wheel_gesture_end(self, *_):
+        self._wheel_gesture_active = False
+
     def _on_paged_wheel(self, controller, dx, dy):
         if not self._wheel_turns or self._mode != "paged" or not self._pages:
             return False
@@ -1631,12 +1667,17 @@ class ReaderView(Gtk.Box):
         action = reader_logic.wheel_turn(dy, at_start, at_end)
         if action is None:
             return False
-        # One turn per wheel gesture: a touchpad sends a stream of small
-        # deltas, and each would otherwise skip a page.
-        now = time.monotonic()
-        if now - self._last_wheel_turn < 0.35:
-            return True
-        self._last_wheel_turn = now
+        if self._wheel_gesture_active:
+            # Touchpad swipe: one turn for the whole gesture.
+            if self._wheel_gesture_turned:
+                return True
+            self._wheel_gesture_turned = True
+        else:
+            # Mouse wheel: no gesture bounds, so space the turns out instead.
+            now = time.monotonic()
+            if now - self._last_wheel_turn < 0.35:
+                return True
+            self._last_wheel_turn = now
         if action == "next":
             self._next_page()
         else:
@@ -1669,6 +1710,9 @@ class ReaderView(Gtk.Box):
         GLib.timeout_add(1000, lambda: setattr(self, "_transitioning_chapter", False) or False)
 
     def _save_progress(self, page_idx: int):
+        if is_incognito(self._db):
+            # Incognito: no saved page, no history entry, no tracker update.
+            return
         if self._chapter and self._chapter.id and self._manga and self._manga.id:
             self._db.update_chapter_progress(self._chapter.id, page_idx)
             self._db.record_history(self._manga.id, self._chapter.id, page_idx)

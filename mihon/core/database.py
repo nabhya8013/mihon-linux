@@ -829,6 +829,18 @@ class Database:
 
     # ── Tracking ───────────────────────────────────────────────────────────
 
+    def get_tracked_library_manga_ids(self) -> List[int]:
+        """Library manga linked to at least one tracker."""
+        rows = self.conn.execute(
+            """
+            SELECT DISTINCT t.manga_id FROM manga_tracking t
+            JOIN manga m ON m.id = t.manga_id
+            WHERE m.in_library = 1
+            ORDER BY t.manga_id
+            """
+        ).fetchall()
+        return [r["manga_id"] for r in rows]
+
     def get_manga_tracking(self, manga_id: int) -> List[dict]:
         rows = self.conn.execute(
             """
