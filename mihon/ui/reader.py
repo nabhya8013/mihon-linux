@@ -730,6 +730,23 @@ class ReaderView(Gtk.Box):
 
         box.append(dir_box)
 
+        # The direction is remembered per series, like Android; the global
+        # default lives in Settings -> Reader.
+        hint_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+        self._direction_hint = Gtk.Label()
+        self._direction_hint.add_css_class("dim-label")
+        self._direction_hint.add_css_class("caption")
+        self._direction_hint.set_hexpand(True)
+        self._direction_hint.set_halign(Gtk.Align.START)
+        self._direction_hint.set_wrap(True)
+        hint_row.append(self._direction_hint)
+        self._direction_reset_btn = Gtk.Button(label="Use Default")
+        self._direction_reset_btn.add_css_class("flat")
+        self._direction_reset_btn.add_css_class("caption")
+        self._direction_reset_btn.connect("clicked", lambda *_: self._clear_series_direction())
+        hint_row.append(self._direction_reset_btn)
+        box.append(hint_row)
+
         # Page layout
         layout_label = Gtk.Label(label="Page Layout")
         layout_label.add_css_class("heading")
@@ -1196,6 +1213,12 @@ class ReaderView(Gtk.Box):
         self._pages = []
         self._current_page = 0
         self._hide_chapter_end()
+
+        wanted = self._series_direction(manga)
+        if wanted != self._direction:
+            self._switch_direction(wanted)
+            self._sync_settings_controls()
+        self._update_direction_hint()
 
         ch_num = f"Ch.{chapter.chapter_number:g}" if chapter.chapter_number >= 0 else chapter.title
         self._chapter_title.set_title(manga.title)
@@ -1756,8 +1779,53 @@ class ReaderView(Gtk.Box):
     def _set_direction(self, btn, direction: ReadingDirection):
         if self._syncing_prefs or not btn.get_active():
             return
+        if self._manga is not None and self._manga.id:
+            # Changing direction while reading sets it for this series only;
+            # the default for everything else stays as it is.
+            self._db.set_manga_reading_mode(self._manga.id, direction.value)
+        else:
+            self._persist_reader_setting("reading_direction", direction.value)
+        self._switch_direction(direction)
+        self._update_direction_hint()
+
+    def _default_direction(self) -> ReadingDirection:
+        try:
+            return ReadingDirection(self._db.get_setting("reading_direction", ReadingDirection.RTL.value))
+        except ValueError:
+            return ReadingDirection.RTL
+
+    def _series_direction(self, manga) -> ReadingDirection:
+        """This series' saved direction, or the default when none is saved."""
+        if manga is not None and manga.id:
+            saved = self._db.get_manga_reading_mode(manga.id)
+            if saved:
+                try:
+                    return ReadingDirection(saved)
+                except ValueError:
+                    pass
+        return self._default_direction()
+
+    def _clear_series_direction(self):
+        if self._manga is not None and self._manga.id:
+            self._db.set_manga_reading_mode(self._manga.id, "")
+        direction = self._default_direction()
+        self._switch_direction(direction)
+        self._sync_settings_controls()
+        self._update_direction_hint()
+
+    def _update_direction_hint(self):
+        if not hasattr(self, "_direction_hint"):
+            return
+        saved = bool(self._manga is not None and self._manga.id
+                     and self._db.get_manga_reading_mode(self._manga.id))
+        self._direction_hint.set_text(
+            "Saved for this series" if saved else "Using the default from Settings → Reader"
+        )
+        self._direction_reset_btn.set_visible(saved)
+
+    def _switch_direction(self, direction: ReadingDirection):
+        """Apply a reading direction to the open chapter without saving it."""
         self._direction = direction
-        self._persist_reader_setting("reading_direction", direction.value)
         if direction == ReadingDirection.WEBTOON:
             self._mode = "webtoon"
             if self._pages:

@@ -193,6 +193,9 @@ class Database:
         for column in ("details_fetched_at", "chapters_fetched_at"):
             if column not in manga_columns:
                 c.execute(f"ALTER TABLE manga ADD COLUMN {column} REAL")
+        # Reading mode chosen for this series in the reader; '' = use the default.
+        if "reading_mode" not in manga_columns:
+            c.execute("ALTER TABLE manga ADD COLUMN reading_mode TEXT DEFAULT ''")
 
         c.executescript("""
         -- Pending tracker updates that could not be delivered. Drained on the
@@ -405,6 +408,19 @@ class Database:
             manga.cover_local_path, manga.score, manga.year, manga.content_rating,
             int(manga.initialized),
         ))
+
+    def get_manga_reading_mode(self, manga_id: int) -> str:
+        """The reading mode saved for one series, or '' to use the default."""
+        row = self.conn.execute(
+            "SELECT reading_mode FROM manga WHERE id=?", (manga_id,)
+        ).fetchone()
+        return (row["reading_mode"] or "") if row else ""
+
+    def set_manga_reading_mode(self, manga_id: int, mode: str) -> None:
+        self.conn.execute(
+            "UPDATE manga SET reading_mode=? WHERE id=?", (mode or "", manga_id)
+        )
+        self.conn.commit()
 
     def mark_details_fetched(self, manga_id: int, when: Optional[float] = None) -> None:
         self.conn.execute(

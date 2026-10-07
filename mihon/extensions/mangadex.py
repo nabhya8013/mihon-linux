@@ -8,7 +8,7 @@ REST API that requires no authentication for reading.
 import re
 import time
 from typing import List, Tuple, Optional
-from .base import Extension
+from .base import Extension, apply_source_order
 from ..core.http_client import create_http_session
 from ..core.models import Manga, Chapter, Page, SearchFilter, ExtensionInfo
 import logging
@@ -326,7 +326,8 @@ class MangaDexExtension(Extension):
             if offset >= total or not items:
                 break
 
-        return all_chapters
+        # The feed is requested newest first (order[chapter]=desc).
+        return apply_source_order(all_chapters)
 
     def get_pages(self, chapter: Chapter) -> List[Page]:
         """Fetch page image URLs for a chapter using the at-home API."""

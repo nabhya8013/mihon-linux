@@ -7,7 +7,7 @@ API: https://api.allanime.day/api (GraphQL, POST or GET)
 """
 import re
 from typing import List, Tuple, Optional
-from .base import Extension
+from .base import Extension, apply_source_order
 from ..core.http_client import create_http_session
 from ..core.models import Manga, Chapter, Page, SearchFilter, ExtensionInfo
 
@@ -323,7 +323,7 @@ class AllMangaExtension(Extension):
             ch.url = f"{manga.source_manga_id}::{ch_str}::{trans}"
             chapters.append(ch)
 
-        return chapters
+        return apply_source_order(chapters)
 
     def get_pages(self, chapter: Chapter) -> List[Page]:
         """Fetch page image URLs for a chapter."""

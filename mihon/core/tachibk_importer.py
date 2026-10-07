@@ -27,6 +27,7 @@ from google.protobuf import descriptor_pb2, descriptor_pool, message_factory, te
 from .database import get_db
 from .models import Chapter, Manga, ReadingStatus
 from .source_ids import to_local_id
+from .backup_mapping import reading_mode_from_viewer_flags, tracking_from_backup
 
 logger = logging.getLogger("tachibk_importer")
 
@@ -182,6 +183,8 @@ class RestoredManga:
     categories: List[int] = field(default_factory=list)
     chapters: List[dict] = field(default_factory=list)
     history: List[dict] = field(default_factory=list)
+    tracking: List[dict] = field(default_factory=list)
+    viewer_flags: int = 0
 
 
 @dataclass
@@ -251,6 +254,23 @@ def parse_backup(path: Path) -> RestoredBackup:
             history=[
                 {"url": h.url, "last_read": h.lastRead} for h in manga.history
             ],
+            tracking=[
+                {
+                    "sync_id": t.syncId,
+                    "library_id": t.libraryId,
+                    "media_id": t.mediaId,
+                    "url": t.trackingUrl or "",
+                    "title": t.title or "",
+                    "last_chapter_read": t.lastChapterRead,
+                    "total_chapters": t.totalChapters,
+                    "score": t.score,
+                    "status": t.status,
+                    "started": t.startedReadingDate,
+                    "finished": t.finishedReadingDate,
+                }
+                for t in manga.tracking
+            ],
+            viewer_flags=manga.viewer_flags,
         )
         backup.mangas.append(restored)
     return backup
@@ -310,6 +330,7 @@ class ImportPreview:
     chapters: int = 0
     read_chapters: int = 0
     existing_manga: int = 0
+    trackers: int = 0
 
     @property
     def new_manga(self) -> int:
@@ -327,6 +348,7 @@ def preview_backup(path: Path) -> ImportPreview:
     for restored in backup.mangas:
         preview.chapters += len(restored.chapters)
         preview.read_chapters += sum(1 for c in restored.chapters if c["read"])
+        preview.trackers += sum(1 for t in restored.tracking if tracking_from_backup(t) is not None)
         if db.get_manga_by_source(to_local_id(restored.source), restored.url) is not None:
             preview.existing_manga += 1
     return preview
@@ -340,6 +362,8 @@ class ImportResult:
     new_manga: int = 0
     imported_chapters: int = 0
     imported_categories: int = 0
+    imported_trackers: int = 0
+    skipped_trackers: int = 0
     errors: List[str] = field(default_factory=list)
 
     @property
@@ -350,13 +374,17 @@ class ImportResult:
         if self.backup is None:
             return "No backup loaded"
         if self.applied:
-            return (
+            text = (
                 f"Restored {self.imported_manga} manga "
                 f"({self.new_manga} new), "
                 f"{self.imported_chapters} chapters, "
                 f"{self.imported_categories} categories, "
+                f"{self.imported_trackers} tracker links, "
                 f"{len(self.errors)} errors"
             )
+            if self.skipped_trackers:
+                text += f" ({self.skipped_trackers} links to unsupported trackers skipped)"
+            return text
         return (
             f"Parsed {len(self.backup.mangas)} manga, "
             f"{len(self.backup.categories)} categories "
@@ -443,6 +471,50 @@ def _restore_history(db, manga_id: int, restored: RestoredManga) -> None:
         )
 
 
+def _restore_tracking(db, manga_id: int, restored: RestoredManga, mode: ConflictMode):
+    """
+    Restore tracker links. Returns (restored, skipped as unsupported).
+
+    Merge adds links the manga does not have yet; overwrite also replaces
+    existing ones with the backup's state. Nothing is sent to the trackers:
+    the next sync or pull reconciles with the remote list.
+    """
+    existing = {row["provider"] for row in db.get_manga_tracking(manga_id)}
+    restored_count = skipped = 0
+    for record in restored.tracking:
+        entry = tracking_from_backup(record)
+        if entry is None:
+            skipped += 1
+            continue
+        if entry.provider in existing and mode is ConflictMode.MERGE:
+            continue
+        db.upsert_manga_tracking(
+            manga_id=manga_id,
+            provider=entry.provider,
+            status=entry.status,
+            progress=entry.progress,
+            score=entry.score,
+            url=entry.url,
+            remote_id=entry.remote_id,
+            library_id=entry.library_id,
+            title=entry.title,
+            total_chapters=entry.total_chapters,
+            started_at=entry.started_at,
+            finished_at=entry.finished_at,
+        )
+        restored_count += 1
+    return restored_count, skipped
+
+
+def _restore_reading_mode(db, manga_id: int, restored: RestoredManga, mode: ConflictMode):
+    reading_mode = reading_mode_from_viewer_flags(restored.viewer_flags)
+    if not reading_mode:
+        return
+    if mode is ConflictMode.MERGE and db.get_manga_reading_mode(manga_id):
+        return
+    db.set_manga_reading_mode(manga_id, reading_mode)
+
+
 def import_tachibk(
     path: Path,
     *,
@@ -520,6 +592,10 @@ def import_tachibk(
 
             result.imported_chapters += _restore_chapters(db, row.id, restored, mode)
             _restore_history(db, row.id, restored)
+            linked, skipped = _restore_tracking(db, row.id, restored, mode)
+            result.imported_trackers += linked
+            result.skipped_trackers += skipped
+            _restore_reading_mode(db, row.id, restored, mode)
             result.imported_manga += 1
         except Exception as exc:
             logger.exception("Restoring %r failed", restored.title)

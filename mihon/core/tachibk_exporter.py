@@ -36,6 +36,8 @@ from .database import get_db
 from .models import Chapter, Manga
 from .source_ids import to_android_id as resolve_source_id, tachiyomi_source_id
 from .tachibk_importer import _ensure_message_classes
+from .backup_mapping import tracking_to_backup, viewer_flags_for_reading_mode
+from .tracking.base import TrackEntry
 
 logger = logging.getLogger("tachibk_exporter")
 
@@ -96,7 +98,39 @@ def _fill_chapter(proto_chapter, chapter: Chapter, source_order: int) -> None:
     proto_chapter.sourceOrder = source_order
 
 
-def _fill_manga(proto_manga, manga: Manga, chapters, category_orders) -> int:
+def _fill_tracking(proto_manga, tracking_rows) -> None:
+    for row in tracking_rows:
+        record = tracking_to_backup(TrackEntry(
+            provider=row.get("provider") or "",
+            remote_id=str(row.get("remote_id") or ""),
+            library_id=str(row.get("library_id") or ""),
+            title=row.get("title") or "",
+            status=row.get("status") or "",
+            progress=float(row.get("progress") or 0),
+            score=float(row.get("score") or 0),
+            total_chapters=float(row.get("total_chapters") or 0),
+            url=row.get("url") or "",
+            started_at=row.get("started_at"),
+            finished_at=row.get("finished_at"),
+        ))
+        if record is None:
+            continue
+        t = proto_manga.tracking.add()
+        t.syncId = record["sync_id"]
+        t.libraryId = record["library_id"]
+        t.mediaId = record["media_id"]
+        t.trackingUrl = record["url"]
+        t.title = record["title"]
+        t.lastChapterRead = record["last_chapter_read"]
+        t.totalChapters = record["total_chapters"]
+        t.score = record["score"]
+        t.status = record["status"]
+        t.startedReadingDate = record["started"]
+        t.finishedReadingDate = record["finished"]
+
+
+def _fill_manga(proto_manga, manga: Manga, chapters, category_orders,
+                tracking_rows=(), reading_mode: str = "") -> int:
     proto_manga.source = resolve_source_id(manga.source_id)
     proto_manga.url = manga.source_manga_id or manga.url or ""
     proto_manga.title = manga.title or ""
@@ -109,6 +143,9 @@ def _fill_manga(proto_manga, manga: Manga, chapters, category_orders) -> int:
     proto_manga.dateAdded = _to_millis(manga.added_at or time.time())
     proto_manga.favorite = bool(manga.in_library)
     proto_manga.categories.extend(category_orders)
+    if reading_mode:
+        proto_manga.viewer_flags = viewer_flags_for_reading_mode(reading_mode)
+    _fill_tracking(proto_manga, tracking_rows)
 
     for source_order, chapter in enumerate(chapters):
         _fill_chapter(proto_manga.chapters.add(), chapter, source_order)
@@ -168,7 +205,11 @@ def build_backup(manga_list: Optional[Iterable[Manga]] = None):
         ]
 
         proto_manga = backup.backupManga.add()
-        total_chapters += _fill_manga(proto_manga, manga, chapters, category_orders)
+        total_chapters += _fill_manga(
+            proto_manga, manga, chapters, category_orders,
+            tracking_rows=db.get_manga_tracking(manga.id) if manga.id else (),
+            reading_mode=db.get_manga_reading_mode(manga.id) if manga.id else "",
+        )
 
         seen_sources.setdefault(proto_manga.source, manga.source_id or "")
 
