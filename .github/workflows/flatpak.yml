@@ -25,9 +25,10 @@ jobs:
     name: Build Flatpak
     runs-on: ubuntu-latest
     timeout-minutes: 45
-    # flatpak-builder needs unprivileged user namespaces, which the GitHub
-    # runner's AppArmor policy blocks. The Flathub build image runs privileged
-    # and already carries the GNOME 50 runtime and SDK.
+    # The Flathub build image ships the full flatpak-builder toolchain plus the
+    # GNOME 50 runtime and SDK. A plain runner with apt's flatpak-builder
+    # failed for lack of `eu-strip` (elfutils). The action's documentation
+    # requires the container to run privileged.
     container:
       image: ghcr.io/flathub-infra/flatpak-github-actions:gnome-50
       options: --privileged
