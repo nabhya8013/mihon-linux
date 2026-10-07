@@ -7,6 +7,7 @@ gi.require_version("Adw", "1")
 from gi.repository import Gtk, Adw, GdkPixbuf, Pango, GLib, Gdk
 from ..core.models import Manga
 from ..core import disk_cache, image_loader
+from ..core.database import get_db
 
 
 class MangaCard(Gtk.Box):
@@ -56,7 +57,7 @@ class MangaCard(Gtk.Box):
             overlay.add_overlay(count_badge)
 
         # Unread badge
-        if manga.unread_count > 0:
+        if manga.unread_count > 0 and get_db().get_setting("show_unread_badge", "1") == "1":
             badge = Gtk.Label(label=str(manga.unread_count))
             badge.add_css_class("unread-badge")
             badge.set_halign(Gtk.Align.END)

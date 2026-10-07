@@ -7,8 +7,36 @@ from typing import List, Optional, Tuple
 from ..core.models import Manga, Chapter, Page, SearchFilter, ExtensionInfo
 
 
+def apply_source_order(chapters: List[Chapter]) -> List[Chapter]:
+    """
+    Fill in ``source_order`` from the order a source listed its chapters.
+
+    Tachiyomi's convention is 0 for the newest chapter. Built-in sources do
+    not all say which way their list runs, so the direction is read from the
+    chapter numbers: mostly falling means newest first, mostly rising means
+    oldest first. With no numbers to go on, newest first is assumed, as in
+    Tachiyomi. Unnumbered chapters keep their place in the list, which is
+    the whole point: it is the only ordering they have.
+    """
+    if not chapters:
+        return chapters
+    numbers = [c.chapter_number for c in chapters if c.chapter_number is not None and c.chapter_number >= 0]
+    falling = sum(1 for a, b in zip(numbers, numbers[1:]) if b < a)
+    rising = sum(1 for a, b in zip(numbers, numbers[1:]) if b > a)
+    oldest_first = rising > falling
+    last = len(chapters) - 1
+    for index, chapter in enumerate(chapters):
+        chapter.source_order = last - index if oldest_first else index
+    return chapters
+
+
 class Extension(ABC):
     """Base class for all manga source extensions."""
+
+    # Whether a fetched chapter list may be reused until it goes stale. A source
+    # whose listing is cheap and can change underneath us (a folder on disk)
+    # sets this False so the list is read again on every visit.
+    cache_chapters: bool = True
 
     @property
     @abstractmethod

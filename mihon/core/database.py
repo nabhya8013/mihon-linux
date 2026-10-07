@@ -190,6 +190,12 @@ class Database:
         }
         if "initialized" not in manga_columns:
             c.execute("ALTER TABLE manga ADD COLUMN initialized INTEGER DEFAULT 0")
+        for column in ("details_fetched_at", "chapters_fetched_at"):
+            if column not in manga_columns:
+                c.execute(f"ALTER TABLE manga ADD COLUMN {column} REAL")
+        # Reading mode chosen for this series in the reader; '' = use the default.
+        if "reading_mode" not in manga_columns:
+            c.execute("ALTER TABLE manga ADD COLUMN reading_mode TEXT DEFAULT ''")
 
         c.executescript("""
         -- Pending tracker updates that could not be delivered. Drained on the
@@ -319,6 +325,13 @@ class Database:
             "scale_type": "fit_page",
             "crop_borders": "0",
             "auto_update_library": "1",
+            "show_unread_badge": "1",
+            "library_update_interval_hours": "12",
+            "smart_update_skip_dropped": "1",
+            "desktop_notifications_enabled": "1",
+            "smart_update_excluded_categories": "[]",
+            "appearance_theme": "dark",
+            "extension_language_filter": json.dumps(["en"]),
             "reader_tap_invert": "0",
             "reader_fullscreen": "0",
             "reader_keep_screen_on": "0",
@@ -395,6 +408,33 @@ class Database:
             manga.cover_local_path, manga.score, manga.year, manga.content_rating,
             int(manga.initialized),
         ))
+
+    def get_manga_reading_mode(self, manga_id: int) -> str:
+        """The reading mode saved for one series, or '' to use the default."""
+        row = self.conn.execute(
+            "SELECT reading_mode FROM manga WHERE id=?", (manga_id,)
+        ).fetchone()
+        return (row["reading_mode"] or "") if row else ""
+
+    def set_manga_reading_mode(self, manga_id: int, mode: str) -> None:
+        self.conn.execute(
+            "UPDATE manga SET reading_mode=? WHERE id=?", (mode or "", manga_id)
+        )
+        self.conn.commit()
+
+    def mark_details_fetched(self, manga_id: int, when: Optional[float] = None) -> None:
+        self.conn.execute(
+            "UPDATE manga SET details_fetched_at=? WHERE id=?",
+            (when if when is not None else time.time(), manga_id),
+        )
+        self.conn.commit()
+
+    def mark_chapters_fetched(self, manga_id: int, when: Optional[float] = None) -> None:
+        self.conn.execute(
+            "UPDATE manga SET chapters_fetched_at=? WHERE id=?",
+            (when if when is not None else time.time(), manga_id),
+        )
+        self.conn.commit()
 
     def get_manga_by_id(self, manga_id: int) -> Optional[Manga]:
         row = self.conn.execute("SELECT * FROM manga WHERE id=?", (manga_id,)).fetchone()
@@ -487,6 +527,8 @@ class Database:
         m.url = row["url"] or ""
         m.in_library = bool(row["in_library"])
         m.initialized = bool(row["initialized"])
+        m.details_fetched_at = row["details_fetched_at"]
+        m.chapters_fetched_at = row["chapters_fetched_at"]
         m.reading_status = ReadingStatus(row["reading_status"] or "none")
         m.unread_count = row["unread_count"] or 0
         m.chapter_count = row["chapter_count"] or 0
@@ -595,6 +637,53 @@ class Database:
             (page, chapter_id)
         )
         self.conn.commit()
+
+    def restore_chapter_progress(self, manga_id: int, progress: dict) -> None:
+        """
+        Set read state for several chapters of one manga at once.
+
+        ``progress`` maps ``source_chapter_id`` to ``(read, last_page_read)``.
+        `upsert_chapters` deliberately leaves read state alone on conflict, so a
+        backup restore needs its own write path for chapters already stored.
+        """
+        if not progress:
+            return
+        with self.transaction():
+            for source_chapter_id, (read, page) in progress.items():
+                self.conn.execute(
+                    "UPDATE chapters SET read=?, last_page_read=? "
+                    "WHERE manga_id=? AND source_chapter_id=?",
+                    (int(bool(read)), int(page or 0), manga_id, source_chapter_id),
+                )
+            self.conn.commit()
+        self.update_unread_count(manga_id)
+
+    def restore_history_entry(self, manga_id: int, chapter_id: int, page: int, read_at: float) -> bool:
+        """
+        Insert a history row with a past timestamp, unless the chapter has one.
+
+        Returns True when a row was written. `last_read_at` only ever moves
+        forward, so restoring an old backup cannot make a manga look less
+        recently read than it already is.
+        """
+        with self.transaction():
+            exists = self.conn.execute(
+                "SELECT 1 FROM history WHERE manga_id=? AND chapter_id=?",
+                (manga_id, chapter_id),
+            ).fetchone()
+            if exists:
+                return False
+            self.conn.execute(
+                "INSERT INTO history(manga_id, chapter_id, page, read_at) VALUES(?,?,?,?)",
+                (manga_id, chapter_id, page, read_at),
+            )
+            self.conn.execute(
+                "UPDATE manga SET last_read_at=? WHERE id=? "
+                "AND (last_read_at IS NULL OR last_read_at < ?)",
+                (read_at, manga_id, read_at),
+            )
+            self.conn.commit()
+            return True
 
     def update_download_status(self, chapter_id: int, status: DownloadStatus, local_path: str = None):
         if local_path:
@@ -755,6 +844,18 @@ class Database:
         return cur.rowcount
 
     # ── Tracking ───────────────────────────────────────────────────────────
+
+    def get_tracked_library_manga_ids(self) -> List[int]:
+        """Library manga linked to at least one tracker."""
+        rows = self.conn.execute(
+            """
+            SELECT DISTINCT t.manga_id FROM manga_tracking t
+            JOIN manga m ON m.id = t.manga_id
+            WHERE m.in_library = 1
+            ORDER BY t.manga_id
+            """
+        ).fetchall()
+        return [r["manga_id"] for r in rows]
 
     def get_manga_tracking(self, manga_id: int) -> List[dict]:
         rows = self.conn.execute(

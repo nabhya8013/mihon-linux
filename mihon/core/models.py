@@ -49,6 +49,10 @@ class Manga:
     # False means the manga came from a browse/search listing, which carries
     # only title and cover, so details are still worth fetching.
     initialized: bool = False
+    # When details / the chapter list were last fetched from the source, so a
+    # stale copy can be refreshed and a fresh one left alone. None = never.
+    details_fetched_at: Optional[float] = None
+    chapters_fetched_at: Optional[float] = None
     reading_status: ReadingStatus = ReadingStatus.NONE
     unread_count: int = 0
     chapter_count: int = 0

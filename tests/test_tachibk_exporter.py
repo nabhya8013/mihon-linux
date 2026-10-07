@@ -45,6 +45,12 @@ class FakeDB:
     def get_manga_category_ids(self, manga_id):
         return list(self._memberships.get(manga_id, []))
 
+    def get_manga_tracking(self, manga_id):
+        return []
+
+    def get_manga_reading_mode(self, manga_id):
+        return ""
+
 
 def _category(cid, name, order):
     return type("Category", (), {"id": cid, "name": name, "sort_order": order})()

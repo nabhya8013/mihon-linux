@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import logging
 import threading
+from dataclasses import dataclass
 import time
 from typing import Callable, Dict, List, Optional
 
@@ -287,6 +288,33 @@ class TrackManager:
             updated += len(self.pull(manga_id))
         return updated
 
+    def pull_library(self) -> "PullSummary":
+        """
+        Pull every tracked library manga from the trackers you are logged in to.
+
+        Run after a scheduled library update, so a score, status or progress
+        changed on AniList or MyAnimeList shows up locally without opening
+        each manga. Entries on a service you are not logged in to are left
+        alone and not counted.
+        """
+        summary = PullSummary()
+        if not self.logged_in_services:
+            return summary
+        logged_in = {s.id for s in self.logged_in_services}
+        for manga_id in self._db.get_tracked_library_manga_ids():
+            before = {
+                e.provider: _sync_state(e)
+                for e in self.entries_for(manga_id) if e.provider in logged_in
+            }
+            if not before:
+                continue
+            after = {e.provider: _sync_state(e) for e in self.pull(manga_id)}
+            for provider, state in before.items():
+                summary.checked += 1
+                if after.get(provider) != state:
+                    summary.changed += 1
+        return summary
+
     # ── Internals ─────────────────────────────────────────────────────────
 
     def _require_service(self, provider: str) -> TrackerService:
@@ -294,6 +322,17 @@ class TrackManager:
         if service is None:
             raise TrackerError(f"Unknown tracking service: {provider}")
         return service
+
+
+def _sync_state(entry: TrackEntry):
+    """The fields a pull can change and a user would notice."""
+    return (entry.status, entry.progress, entry.score)
+
+
+@dataclass
+class PullSummary:
+    checked: int = 0
+    changed: int = 0
 
 
 _manager: Optional[TrackManager] = None

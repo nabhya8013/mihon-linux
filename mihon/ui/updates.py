@@ -5,12 +5,18 @@ import gi
 gi.require_version("Gtk", "4.0")
 gi.require_version("Adw", "1")
 from gi.repository import Gtk, Adw, GLib
+import json
 import threading
 import time
 
 from ..core.database import get_db
 from ..core.library_updater import LibraryUpdater, LibraryUpdateSummary
+from ..core import upcoming as upcoming_logic
 from .widgets import EmptyState, LoadingSpinner
+from .notify import notify_desktop
+import logging
+
+logger = logging.getLogger("updates")
 
 
 class UpdatesView(Gtk.Box):
@@ -26,9 +32,11 @@ class UpdatesView(Gtk.Box):
         self._checking = False
         self._last_checked_at = None
         self._did_initial_refresh = False
+        self._scheduled_source = None
 
         self._build_ui()
         self.refresh_cached()
+        self.reschedule()
 
     def _build_ui(self):
         header_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
@@ -50,6 +58,22 @@ class UpdatesView(Gtk.Box):
         self._status_label.set_xalign(0)
         title_box.append(self._status_label)
         header_box.append(title_box)
+
+        # Updates (what arrived) or Upcoming (what is expected next).
+        mode_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=0)
+        mode_box.add_css_class("linked")
+        mode_box.set_valign(Gtk.Align.CENTER)
+        self._updates_mode_btn = Gtk.ToggleButton(label="Updates")
+        self._updates_mode_btn.set_active(True)
+        self._upcoming_mode_btn = Gtk.ToggleButton(label="Upcoming")
+        self._upcoming_mode_btn.set_group(self._updates_mode_btn)
+        self._upcoming_mode_btn.set_tooltip_text(
+            "Expected next chapters, predicted from each series' release rhythm"
+        )
+        self._upcoming_mode_btn.connect("toggled", self._on_mode_toggled)
+        mode_box.append(self._updates_mode_btn)
+        mode_box.append(self._upcoming_mode_btn)
+        header_box.append(mode_box)
 
         self._spinner = Gtk.Spinner()
         self._spinner.set_visible(False)
@@ -91,6 +115,22 @@ class UpdatesView(Gtk.Box):
         scroll.set_child(self._list)
         self._stack.add_named(scroll, "list")
 
+        self._upcoming_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=18)
+        for side in ("start", "end", "top", "bottom"):
+            getattr(self._upcoming_box, f"set_margin_{side}")(16)
+        upcoming_scroll = Gtk.ScrolledWindow()
+        upcoming_scroll.set_vexpand(True)
+        upcoming_scroll.set_child(self._upcoming_box)
+        self._stack.add_named(upcoming_scroll, "upcoming")
+
+        self._upcoming_empty = EmptyState(
+            "x-office-calendar-symbolic",
+            "Nothing upcoming",
+            "Predictions need at least three releases with dates. "
+            "Finished series and ones that seem paused are left out.",
+        )
+        self._stack.add_named(self._upcoming_empty, "upcoming-empty")
+
     def refresh_cached(self):
         """
         Refresh from local DB unread counts without hitting network.
@@ -113,14 +153,59 @@ class UpdatesView(Gtk.Box):
         self._did_initial_refresh = True
         self._start_update_check()
 
+    def reschedule(self):
+        """
+        (Re)arm the periodic background check per the configured interval.
+        Call this after the interval or auto-update setting changes.
+        """
+        if self._scheduled_source is not None:
+            GLib.source_remove(self._scheduled_source)
+            self._scheduled_source = None
+
+        if self._db.get_setting("auto_update_library", "1") != "1":
+            return
+        try:
+            hours = float(self._db.get_setting("library_update_interval_hours", "12"))
+        except ValueError:
+            hours = 12.0
+        if hours <= 0:
+            return  # "Manual only"
+
+        self._scheduled_source = GLib.timeout_add_seconds(
+            int(hours * 3600), self._on_scheduled_check_tick
+        )
+
+    def _on_scheduled_check_tick(self) -> bool:
+        # Idle manga cost a source round trip every cycle for no benefit, so
+        # scheduled runs can skip anything the user has dropped or put in an
+        # excluded category; the button below always checks everything.
+        if not self._checking:
+            skip_dropped = self._db.get_setting("smart_update_skip_dropped", "1") == "1"
+            try:
+                excluded = json.loads(self._db.get_setting("smart_update_excluded_categories", "[]"))
+            except ValueError:
+                excluded = []
+            # A silent background run is exactly the case a desktop
+            # notification is for - the user isn't watching this tab.
+            self._start_update_check(
+                skip_dropped=skip_dropped, excluded_category_ids=excluded, desktop_notify=True
+            )
+        return True  # keep firing on this interval
+
     def _on_check_updates_clicked(self, *_):
         self._start_update_check()
 
-    def _start_update_check(self):
+    def _start_update_check(
+        self,
+        skip_dropped: bool = False,
+        excluded_category_ids=None,
+        desktop_notify: bool = False,
+    ):
         if self._checking:
             return
 
         self._checking = True
+        self._pending_desktop_notify = desktop_notify
         self._check_btn.set_sensitive(False)
         self._spinner.set_visible(True)
         self._spinner.start()
@@ -128,7 +213,11 @@ class UpdatesView(Gtk.Box):
         self._stack.set_visible_child_name("loading")
 
         def run():
-            summary = self._updater.check_updates(progress_cb=self._on_progress)
+            summary = self._updater.check_updates(
+                progress_cb=self._on_progress,
+                skip_dropped=skip_dropped,
+                excluded_category_ids=excluded_category_ids,
+            )
             GLib.idle_add(self._on_check_complete, summary)
 
         threading.Thread(target=run, daemon=True).start()
@@ -155,14 +244,109 @@ class UpdatesView(Gtk.Box):
             status += f"  •  {summary.failures} failed"
         self._status_label.set_text(status)
 
-        if summary.results:
+        if self._showing_upcoming():
+            # New chapters change the predictions; the updates list can wait.
+            self.refresh_upcoming()
+        elif summary.results:
             self._render_update_results(summary)
         else:
             # Still show cached unread as fallback after a check.
             self.refresh_cached()
 
+        if getattr(self, "_pending_desktop_notify", False):
+            # This was a scheduled run: bring tracker changes made elsewhere
+            # (the AniList site, the Android app) back in as well.
+            self._pull_trackers()
+
+        if getattr(self, "_pending_desktop_notify", False) and summary.updated_manga:
+            titles = ", ".join(r.manga.title for r in summary.results[:3])
+            if summary.updated_manga > 3:
+                titles += f", +{summary.updated_manga - 3} more"
+            notify_desktop(
+                self,
+                f"{summary.new_chapters} new chapter"
+                f"{'s' if summary.new_chapters != 1 else ''}",
+                titles,
+                notification_id="library-update",
+            )
+        self._pending_desktop_notify = False
+
+    def _pull_trackers(self):
+        if self._db.get_setting("tracker_pull_after_update", "1") != "1":
+            return
+
+        def run():
+            try:
+                from ..core.tracking import get_track_manager
+                result = get_track_manager().pull_library()
+                logger.info("scheduled tracker pull: %d checked, %d changed",
+                            result.checked, result.changed)
+            except Exception as exc:
+                logger.warning("scheduled tracker pull failed: %s", exc)
+
+        threading.Thread(target=run, daemon=True).start()
+
+    # ── Upcoming ─────────────────────────────────────────────────────────
+
+    def _on_mode_toggled(self, btn):
+        if btn.get_active():
+            self.refresh_upcoming()
+        else:
+            self.refresh_cached()
+
+    def _showing_upcoming(self) -> bool:
+        return self._upcoming_mode_btn.get_active()
+
+    def refresh_upcoming(self):
+        """Recompute predictions from the stored chapter dates, off the main thread."""
+        def load():
+            entries = []
+            for manga in self._db.get_library():
+                if manga.id is None:
+                    continue
+                times = [c.uploaded_at for c in self._db.get_chapters(manga.id)]
+                entries.append((manga, times))
+            now = time.time()
+            groups = upcoming_logic.group_by_day(upcoming_logic.upcoming(entries, now=now), now)
+            GLib.idle_add(self._render_upcoming, groups, now)
+
+        threading.Thread(target=load, daemon=True).start()
+
+    def _render_upcoming(self, groups, now):
+        if not self._showing_upcoming():
+            return False
+        child = self._upcoming_box.get_first_child()
+        while child:
+            nxt = child.get_next_sibling()
+            self._upcoming_box.remove(child)
+            child = nxt
+        if not groups:
+            self._stack.set_visible_child_name("upcoming-empty")
+            return False
+        for label, predictions in groups:
+            group = Adw.PreferencesGroup(title=label)
+            for prediction in predictions:
+                manga = prediction.manga
+                ago = max(0, round((now - prediction.last_release) / upcoming_logic.DAY))
+                rhythm = upcoming_logic.describe_interval(prediction.interval_days)
+                last = "today" if ago == 0 else ("yesterday" if ago == 1 else f"{ago} days ago")
+                subtitle = f"{rhythm}  •  last chapter {last}"
+                if prediction.overdue:
+                    subtitle = f"Late  •  {subtitle}"
+                row = Adw.ActionRow(title=manga.title, subtitle=subtitle)
+                row.add_prefix(Gtk.Image.new_from_icon_name("x-office-calendar-symbolic"))
+                arrow = Gtk.Image.new_from_icon_name("go-next-symbolic")
+                arrow.add_css_class("dim-label")
+                row.add_suffix(arrow)
+                row.set_activatable(True)
+                row.connect("activated", lambda _r, m=manga: self._open_manga(m))
+                group.add(row)
+            self._upcoming_box.append(group)
+        self._stack.set_visible_child_name("upcoming")
+        return False
+
     def _render_cached_unread(self, unread_manga):
-        if self._checking:
+        if self._checking or self._showing_upcoming():
             return
         self._clear_list()
         if not unread_manga:

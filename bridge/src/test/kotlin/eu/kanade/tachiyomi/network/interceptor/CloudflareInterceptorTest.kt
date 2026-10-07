@@ -188,17 +188,23 @@ class CloudflareInterceptorTest {
         Thread {
             Thread.sleep(delayMs)
             val requestPath = challengeDir.resolve("challenge_request.json")
-            // Wait until the interceptor writes the request
-            val deadline = System.currentTimeMillis() + 1_000
-            while (!requestPath.exists() && System.currentTimeMillis() < deadline) {
-                Thread.sleep(5)
+            val idPattern = Regex("\"request_id\"\\s*:\\s*\"([^\"]+)\"")
+            // Wait until a complete request can be read. Like the real solver,
+            // treat an unreadable file as "not yet" rather than giving up: a
+            // single read that fails would otherwise strand the interceptor
+            // until its timeout.
+            val deadline = System.currentTimeMillis() + 5_000
+            var id: String? = null
+            while (id == null && System.currentTimeMillis() < deadline) {
+                id = runCatching { idPattern.find(Files.readString(requestPath))?.groupValues?.get(1) }
+                    .getOrNull()
+                if (id == null) Thread.sleep(5)
             }
-            if (requestPath.exists()) {
-                val text = Files.readString(requestPath)
-                val id = Regex("\"request_id\"\\s*:\\s*\"([^\"]+)\"")
-                    .find(text)?.groupValues?.get(1) ?: return@Thread
+            if (id != null) {
                 val responsePath = challengeDir.resolve("challenge_response_$id.json")
-                Files.writeString(responsePath, "{\"request_id\":\"$id\",\"solved\":true}")
+                val tmp = challengeDir.resolve("challenge_response_$id.json.tmp")
+                Files.writeString(tmp, "{\"request_id\":\"$id\",\"solved\":true}")
+                Files.move(tmp, responsePath, java.nio.file.StandardCopyOption.ATOMIC_MOVE)
             }
         }.also { it.isDaemon = true }.start()
     }

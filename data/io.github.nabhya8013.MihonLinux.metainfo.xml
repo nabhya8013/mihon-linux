@@ -71,9 +71,15 @@
   </developer>
 
   <releases>
-    <release version="1.0.0" date="2026-09-10">
+    <release version="0.1.0" date="2026-10-07">
       <description>
-        <p>Source filters, backup export, reader page prefetching and concurrent global search.</p>
+        <p>First release.</p>
+        <ul>
+          <li>Paged and webtoon reader with zoom, tap zones, keyboard control and a per-series reading mode</li>
+          <li>Built-in sources, a local source, and Tachiyomi/Mihon APK extensions through a JVM bridge</li>
+          <li>Backup and restore compatible with Android Mihon, including tracker links</li>
+          <li>AniList and MyAnimeList tracking, scheduled library updates and an Upcoming view</li>
+        </ul>
       </description>
     </release>
   </releases>

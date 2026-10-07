@@ -32,6 +32,7 @@ DESKTOP_FILE="$DATADIR/applications/$APP_ID.desktop"
 METAINFO_FILE="$DATADIR/metainfo/$APP_ID.metainfo.xml"
 ICON_FILE="$DATADIR/icons/hicolor/scalable/apps/$APP_ID.svg"
 SYMBOLIC_FILE="$DATADIR/icons/hicolor/symbolic/apps/$APP_ID-symbolic.svg"
+RASTER_ICON_SIZES="48 64 128 256"
 LAUNCHER="$BINDIR/mihon-linux"
 
 refresh_caches() {
@@ -47,6 +48,9 @@ refresh_caches() {
 
 if [ "$UNINSTALL" -eq 1 ]; then
     rm -f "$DESKTOP_FILE" "$METAINFO_FILE" "$ICON_FILE" "$SYMBOLIC_FILE" "$LAUNCHER"
+    for size in $RASTER_ICON_SIZES; do
+        rm -f "$DATADIR/icons/hicolor/${size}x${size}/apps/$APP_ID.png"
+    done
     refresh_caches
     echo "Removed Mihon for Linux desktop integration from $PREFIX"
     exit 0
@@ -56,6 +60,11 @@ install -Dm644 "$DATA_SRC/$APP_ID.desktop" "$DESKTOP_FILE"
 install -Dm644 "$DATA_SRC/$APP_ID.metainfo.xml" "$METAINFO_FILE"
 install -Dm644 "$DATA_SRC/icons/hicolor/scalable/apps/$APP_ID.svg" "$ICON_FILE"
 install -Dm644 "$DATA_SRC/icons/hicolor/symbolic/apps/$APP_ID-symbolic.svg" "$SYMBOLIC_FILE"
+for size in $RASTER_ICON_SIZES; do
+    install -Dm644 \
+        "$DATA_SRC/icons/hicolor/${size}x${size}/apps/$APP_ID.png" \
+        "$DATADIR/icons/hicolor/${size}x${size}/apps/$APP_ID.png"
+done
 
 # The desktop entry runs `mihon-linux`, so drop a launcher on PATH that points
 # back at this checkout. A distro package would ship a real entry point here

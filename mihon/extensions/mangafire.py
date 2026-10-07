@@ -5,7 +5,7 @@ handled transparently by the shared HTTP session's WebKit challenge solver.
 """
 
 from typing import List, Tuple
-from .base import Extension
+from .base import Extension, apply_source_order
 from ..core.http_client import create_http_session
 from ..core.models import Manga, Chapter, Page, SearchFilter, ExtensionInfo
 
@@ -260,7 +260,7 @@ class MangaFireExtension(Extension):
             data = self._get(f"/manga/{manga.source_manga_id}/chapters")
             chapters_data = data.get("data", []) if isinstance(data, dict) else []
             chapters = [self._to_chapter(manga.source_manga_id, c) for c in chapters_data]
-            return chapters
+            return apply_source_order(chapters)
         except Exception as e:
             print(f"[mangafire] get_chapters error: {e}")
             return []

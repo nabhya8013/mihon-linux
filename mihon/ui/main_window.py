@@ -5,11 +5,12 @@ Uses Adw.NavigationSplitView for responsive layout.
 import gi
 gi.require_version("Gtk", "4.0")
 gi.require_version("Adw", "1")
-from gi.repository import Gtk, Adw, GLib, GObject, Gio
+from gi.repository import Gtk, Adw, GLib, GObject, Gio, Pango
+import json
 import threading
 import webbrowser
 from pathlib import Path
-from ..core.models import Manga, Chapter
+from ..core.models import Manga, Chapter, DownloadStatus
 from ..core.http_client import set_challenge_solver
 from .library import LibraryView
 from .browse import BrowseView, SourceCatalogView
@@ -17,10 +18,13 @@ from .updates import UpdatesView
 from .manga_detail import MangaDetailView
 from .reader import ReaderView
 from .challenge_solver import WebKitCookieSolver
-from ..core.database import get_db
+from ..core.database import get_db, DOWNLOADS_DIR
+from ..core.privacy import is_incognito, set_incognito
 from ..core.tracking import get_track_manager
 from ..extensions.repo_manager import get_repo_manager
-from .notify import notify, notify_error
+from .notify import notify, notify_error, notify_desktop
+from . import theme
+from .theme import apply_appearance_theme
 import logging
 
 logger = logging.getLogger("main_window")
@@ -39,6 +43,10 @@ class MainWindow(Adw.ApplicationWindow):
         self._setup_shortcuts()
         self._challenge_solver = WebKitCookieSolver(self)
         set_challenge_solver(self._challenge_solver.solve)
+
+        from ..core.downloader import get_download_manager
+        get_download_manager().on_status(self._on_download_status_changed)
+
         GLib.idle_add(self._run_startup_tasks)
 
     def _build_ui(self):
@@ -138,6 +146,24 @@ class MainWindow(Adw.ApplicationWindow):
             self._refresh_history()
         elif current == "more":
             self._refresh_downloads()
+            self._start_downloads_refresh_timer()
+            return
+        self._stop_downloads_refresh_timer()
+
+    def _start_downloads_refresh_timer(self):
+        if getattr(self, "_downloads_refresh_source", None) is not None:
+            return
+        self._downloads_refresh_source = GLib.timeout_add(2000, self._on_downloads_refresh_tick)
+
+    def _stop_downloads_refresh_timer(self):
+        source = getattr(self, "_downloads_refresh_source", None)
+        if source is not None:
+            GLib.source_remove(source)
+            self._downloads_refresh_source = None
+
+    def _on_downloads_refresh_tick(self) -> bool:
+        self._refresh_downloads()
+        return True
 
     def _run_startup_tasks(self):
         from ..core.database import get_db
@@ -298,6 +324,20 @@ class MainWindow(Adw.ApplicationWindow):
 
     # ── More (Settings & Downloads) view ───────────────────────────────────
 
+    # One compact scrolling panel used to grow unmanageable (9 preference
+    # groups stacked in a single page). It's now a list of sections that
+    # push a dedicated page onto the same nav stack manga detail/browse use.
+    _SETTINGS_SECTIONS = [
+        ("Reader", "Direction, layout, background", "view-paged-symbolic", "_build_reader_settings_page"),
+        ("Appearance", "Theme", "applications-graphics-symbolic", "_build_appearance_settings_page"),
+        ("Library", "Updates, badges, notifications", "library-symbolic", "_build_library_settings_page"),
+        ("Downloads and Data", "Queue, location, cache", "folder-download-symbolic", "_build_downloads_settings_page"),
+        ("Backup and Restore", "Export and import .tachibk backups", "document-save-symbolic", "_build_backup_settings_page"),
+        ("Sources", "Local library, extension repositories", "find-location-symbolic", "_build_sources_settings_page"),
+        ("Tracking", "AniList, MyAnimeList", "network-transmit-receive-symbolic", "_build_tracking_settings_page"),
+        ("About", "Version", "help-about-symbolic", "_build_about_settings_page"),
+    ]
+
     def _build_more_view(self) -> Gtk.Box:
         box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=0)
 
@@ -312,6 +352,82 @@ class MainWindow(Adw.ApplicationWindow):
         content.set_hexpand(True)
         content.set_halign(Gtk.Align.FILL)
 
+        # Incognito sits above the settings list, as on Android: it is a
+        # switch people flip while reading, not something to dig for.
+        privacy_group = Adw.PreferencesGroup()
+        content.append(privacy_group)
+        self._incognito_row = Adw.SwitchRow(
+            title="Incognito mode",
+            subtitle="Reading leaves no history, saved page or tracker update",
+        )
+        self._incognito_row.add_prefix(Gtk.Image.new_from_icon_name("view-conceal-symbolic"))
+        self._incognito_row.set_active(is_incognito(get_db()))
+        self._incognito_row.connect("notify::active", self._on_incognito_toggled)
+        privacy_group.add(self._incognito_row)
+
+        settings_group = Adw.PreferencesGroup(title="Settings")
+        content.append(settings_group)
+
+        # Built eagerly (not on first visit) so every self._xxx widget these
+        # pages create keeps existing the moment the window opens - refresh
+        # methods elsewhere (_refresh_downloads, _refresh_local_dir_row, the
+        # tracking queue label, ...) already assume that and fire off the
+        # "more" tab alone, before any specific section has been opened.
+        self._settings_pages = {}
+        for title, subtitle, icon_name, builder_name in self._SETTINGS_SECTIONS:
+            self._settings_pages[title] = self._build_settings_page(title, builder_name)
+
+            row = Adw.ActionRow(title=title, subtitle=subtitle)
+            row.add_prefix(Gtk.Image.new_from_icon_name(icon_name))
+            arrow = Gtk.Image.new_from_icon_name("go-next-symbolic")
+            arrow.add_css_class("dim-label")
+            row.add_suffix(arrow)
+            row.set_activatable(True)
+            row.connect("activated", self._on_settings_section_activated, title)
+            settings_group.add(row)
+
+        scroll.set_child(content)
+        box.append(scroll)
+        return box
+
+    def _on_incognito_toggled(self, row, *_):
+        set_incognito(get_db(), row.get_active())
+        notify(self, "Incognito mode on: reading is not recorded" if row.get_active()
+               else "Incognito mode off")
+
+    def _build_settings_page(self, title: str, builder_name: str) -> Adw.NavigationPage:
+        section_content = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=16)
+        section_content.set_margin_start(32)
+        section_content.set_margin_end(32)
+        section_content.set_margin_top(16)
+        section_content.set_margin_bottom(16)
+        section_content.set_hexpand(True)
+        section_content.set_halign(Gtk.Align.FILL)
+        getattr(self, builder_name)(section_content)
+
+        scroll = Gtk.ScrolledWindow()
+        scroll.set_vexpand(True)
+        scroll.set_child(section_content)
+
+        header = Adw.HeaderBar()
+        header.set_show_end_title_buttons(True)
+        header.set_show_start_title_buttons(False)
+        header.set_title_widget(Adw.WindowTitle(title=title))
+        back_btn = Gtk.Button(icon_name="go-previous-symbolic")
+        back_btn.set_tooltip_text("Back")
+        back_btn.connect("clicked", lambda *_: self._nav_view.pop())
+        header.pack_start(back_btn)
+
+        page_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=0)
+        page_box.append(header)
+        page_box.append(scroll)
+
+        return Adw.NavigationPage.new(page_box, title)
+
+    def _on_settings_section_activated(self, _row, title: str):
+        self._nav_view.push(self._settings_pages[title])
+
+    def _build_downloads_settings_page(self, content):
         # Downloads group
         dl_group = Adw.PreferencesGroup(title="Downloads")
         content.append(dl_group)
@@ -321,77 +437,29 @@ class MainWindow(Adw.ApplicationWindow):
         self._downloads_list.add_css_class("boxed-list")
         dl_group.add(self._downloads_list)
 
-        dl_path_row = Adw.ActionRow(title="Download Location")
-        dl_path_row.set_subtitle(str(__import__("pathlib").Path.home() / ".local" / "share" / "mihon-linux" / "downloads"))
-        dl_group.add(dl_path_row)
+        self._dl_path_row = Adw.ActionRow(title="Download Location")
+        self._dl_path_row.set_subtitle(get_db().get_setting("download_dir", str(DOWNLOADS_DIR)))
+        self._dl_path_row.set_subtitle_lines(2)
+        dl_choose_btn = Gtk.Button(label="Choose…")
+        dl_choose_btn.set_valign(Gtk.Align.CENTER)
+        dl_choose_btn.connect("clicked", self._on_choose_download_dir)
+        self._dl_path_row.add_suffix(dl_choose_btn)
+        self._dl_path_row.set_activatable_widget(dl_choose_btn)
+        dl_group.add(self._dl_path_row)
 
-        # Reader settings group
-        reader_group = Adw.PreferencesGroup(title="Reader")
-        content.append(reader_group)
+        max_dl_row = Adw.SpinRow.new_with_range(1, 10, 1)
+        max_dl_row.set_title("Max simultaneous downloads")
+        max_dl_row.set_subtitle("Applies the next time the app starts")
+        try:
+            current_max = int(get_db().get_setting("max_simultaneous_downloads", "3"))
+        except ValueError:
+            current_max = 3
+        max_dl_row.set_value(current_max)
+        max_dl_row.connect("notify::value", self._on_max_downloads_changed)
+        dl_group.add(max_dl_row)
 
-        dir_row = Adw.ComboRow(title="Default Reading Direction")
-        dir_model = Gtk.StringList.new(["Right to Left (RTL)", "Left to Right (LTR)", "Vertical", "Webtoon"])
-        dir_row.set_model(dir_model)
-        dir_row.set_selected(0)
-        reader_group.add(dir_row)
-
-        layout_row = Adw.ComboRow(title="Page Layout")
-        layout_model = Gtk.StringList.new(["Single Page", "Double Page"])
-        layout_row.set_model(layout_model)
-        reader_group.add(layout_row)
-
-        bg_row = Adw.ComboRow(title="Reader Background")
-        bg_model = Gtk.StringList.new(["Black", "White", "Gray"])
-        bg_row.set_model(bg_model)
-        reader_group.add(bg_row)
-
-        # Library group
-        lib_group = Adw.PreferencesGroup(title="Library")
-        content.append(lib_group)
-
-        from ..core.database import get_db
-        self._auto_update_row = Adw.SwitchRow(
-            title="Auto-update library",
-            subtitle="Check for new chapters on startup",
-        )
-        auto_update = get_db().get_setting("auto_update_library", "1") == "1"
-        self._auto_update_row.set_active(auto_update)
-        self._auto_update_row.connect("notify::active", self._on_auto_update_toggled)
-        lib_group.add(self._auto_update_row)
-
-        unread_row = Adw.SwitchRow(title="Show unread badge", subtitle="Show unread chapter count on covers")
-        unread_row.set_active(True)
-        lib_group.add(unread_row)
-
-        # Data group: backup / restore
-        data_group = Adw.PreferencesGroup(
-            title="Data",
-            description="Move your library between this app and Mihon on Android.",
-        )
+        data_group = Adw.PreferencesGroup(title="Storage")
         content.append(data_group)
-
-        import_row = Adw.ActionRow(
-            title="Import .tachibk backup",
-            subtitle="Restore your library, categories, and chapter metadata from an Android Mihon backup file.",
-        )
-        import_btn = Gtk.Button(label="Choose File…")
-        import_btn.add_css_class("suggested-action")
-        import_btn.set_valign(Gtk.Align.CENTER)
-        import_btn.connect("clicked", self._on_import_tachibk_clicked)
-        import_row.add_suffix(import_btn)
-        import_row.set_activatable_widget(import_btn)
-        data_group.add(import_row)
-
-        export_row = Adw.ActionRow(
-            title="Export .tachibk backup",
-            subtitle="Write your library, categories, and chapter progress to a file Android Mihon can restore.",
-        )
-        export_btn = Gtk.Button(label="Save As…")
-        export_btn.set_valign(Gtk.Align.CENTER)
-        export_btn.connect("clicked", self._on_export_tachibk_clicked)
-        export_row.add_suffix(export_btn)
-        export_row.set_activatable_widget(export_btn)
-        data_group.add(export_row)
 
         cache_row = Adw.ActionRow(
             title="Clear page cache",
@@ -410,6 +478,172 @@ class MainWindow(Adw.ApplicationWindow):
         data_group.add(cache_row)
         self._refresh_cache_size()
 
+    def _build_backup_settings_page(self, content):
+        export_group = Adw.PreferencesGroup(
+            title="Back up",
+            description="Write your library to a file Mihon on Android can restore.",
+        )
+        content.append(export_group)
+
+        export_row = Adw.ActionRow(
+            title="Export .tachibk backup",
+            subtitle="Library, categories, chapter read progress, and reading history.",
+        )
+        export_btn = Gtk.Button(label="Save As…")
+        export_btn.set_valign(Gtk.Align.CENTER)
+        export_btn.connect("clicked", self._on_export_tachibk_clicked)
+        export_row.add_suffix(export_btn)
+        export_row.set_activatable_widget(export_btn)
+        export_group.add(export_row)
+
+        import_group = Adw.PreferencesGroup(
+            title="Restore",
+            description=(
+                "Pick a backup and review what it contains before anything is "
+                "written. Restoring never removes manga or chapters."
+            ),
+        )
+        content.append(import_group)
+
+        import_row = Adw.ActionRow(
+            title="Import .tachibk backup",
+            subtitle="From this app or from Mihon on Android.",
+        )
+        import_btn = Gtk.Button(label="Choose File…")
+        import_btn.add_css_class("suggested-action")
+        import_btn.set_valign(Gtk.Align.CENTER)
+        import_btn.connect("clicked", self._on_import_tachibk_clicked)
+        import_row.add_suffix(import_btn)
+        import_row.set_activatable_widget(import_btn)
+        import_group.add(import_row)
+
+    def _build_reader_settings_page(self, content):
+        # Reader settings group
+        reader_group = Adw.PreferencesGroup(
+            title="Reader",
+            description="Defaults for new chapters. Changing direction/layout/background from the reader toolbar updates these too.",
+        )
+        content.append(reader_group)
+
+        db = get_db()
+
+        self._DIRECTION_VALUES = ["rtl", "ltr", "vertical", "webtoon"]
+        dir_row = Adw.ComboRow(title="Default Reading Direction")
+        dir_model = Gtk.StringList.new(["Right to Left (RTL)", "Left to Right (LTR)", "Vertical", "Webtoon"])
+        dir_row.set_model(dir_model)
+        current_direction = db.get_setting("reading_direction", "rtl")
+        dir_row.set_selected(
+            self._DIRECTION_VALUES.index(current_direction)
+            if current_direction in self._DIRECTION_VALUES else 0
+        )
+        dir_row.connect("notify::selected", self._on_default_direction_changed)
+        reader_group.add(dir_row)
+
+        self._LAYOUT_VALUES = ["single", "double", "auto"]
+        layout_row = Adw.ComboRow(title="Page Layout")
+        layout_model = Gtk.StringList.new(["Single Page", "Double Page", "Auto"])
+        layout_row.set_model(layout_model)
+        current_layout = db.get_setting("page_layout", "single")
+        layout_row.set_selected(
+            self._LAYOUT_VALUES.index(current_layout)
+            if current_layout in self._LAYOUT_VALUES else 0
+        )
+        layout_row.connect("notify::selected", self._on_default_layout_changed)
+        reader_group.add(layout_row)
+
+        self._BG_VALUES = ["black", "white", "gray"]
+        bg_row = Adw.ComboRow(title="Reader Background")
+        bg_model = Gtk.StringList.new(["Black", "White", "Gray"])
+        bg_row.set_model(bg_model)
+        current_bg = db.get_setting("reader_background", "black")
+        bg_row.set_selected(
+            self._BG_VALUES.index(current_bg) if current_bg in self._BG_VALUES else 0
+        )
+        bg_row.connect("notify::selected", self._on_default_background_changed)
+        reader_group.add(bg_row)
+
+    def _build_appearance_settings_page(self, content):
+        # Appearance group
+        appearance_group = Adw.PreferencesGroup(title="Appearance")
+        content.append(appearance_group)
+
+        self._THEME_VALUES = list(theme.THEME_VALUES)
+        theme_row = Adw.ComboRow(title="Theme")
+        theme_row.set_model(Gtk.StringList.new(["System", "Light", "Dark"]))
+        current_theme = get_db().get_setting("appearance_theme", "dark")
+        theme_row.set_selected(
+            self._THEME_VALUES.index(current_theme) if current_theme in self._THEME_VALUES else 2
+        )
+        theme_row.connect("notify::selected", self._on_theme_changed)
+        appearance_group.add(theme_row)
+
+    def _build_library_settings_page(self, content):
+        # Library group
+        lib_group = Adw.PreferencesGroup(title="Library")
+        content.append(lib_group)
+
+        self._auto_update_row = Adw.SwitchRow(
+            title="Auto-update library",
+            subtitle="Check for new chapters on startup and on a schedule",
+        )
+        auto_update = get_db().get_setting("auto_update_library", "1") == "1"
+        self._auto_update_row.set_active(auto_update)
+        self._auto_update_row.connect("notify::active", self._on_auto_update_toggled)
+        lib_group.add(self._auto_update_row)
+
+        self._UPDATE_INTERVAL_VALUES = ["0", "6", "12", "24"]
+        interval_row = Adw.ComboRow(
+            title="Update interval",
+            subtitle="How often to check the library in the background",
+        )
+        interval_row.set_model(Gtk.StringList.new(["Manual only", "Every 6 hours", "Every 12 hours", "Every 24 hours"]))
+        current_interval = get_db().get_setting("library_update_interval_hours", "12")
+        interval_row.set_selected(
+            self._UPDATE_INTERVAL_VALUES.index(current_interval)
+            if current_interval in self._UPDATE_INTERVAL_VALUES else 2
+        )
+        interval_row.connect("notify::selected", self._on_update_interval_changed)
+        lib_group.add(interval_row)
+
+        skip_dropped_row = Adw.SwitchRow(
+            title="Skip dropped manga in background checks",
+            subtitle="The manual Check Updates button always checks everything",
+        )
+        skip_dropped_row.set_active(get_db().get_setting("smart_update_skip_dropped", "1") == "1")
+        skip_dropped_row.connect("notify::active", self._on_skip_dropped_toggled)
+        lib_group.add(skip_dropped_row)
+
+        categories_row = Adw.ExpanderRow(
+            title="Exclude categories from background updates",
+            subtitle="The manual Check Updates button always checks everything",
+        )
+        try:
+            excluded_ids = set(json.loads(
+                get_db().get_setting("smart_update_excluded_categories", "[]")
+            ))
+        except ValueError:
+            excluded_ids = set()
+        for category in get_db().get_categories():
+            cat_row = Adw.SwitchRow(title=category.name)
+            cat_row.set_active(category.id in excluded_ids)
+            cat_row.connect("notify::active", self._on_category_excluded_toggled, category.id)
+            categories_row.add_row(cat_row)
+        lib_group.add(categories_row)
+
+        unread_row = Adw.SwitchRow(title="Show unread badge", subtitle="Show unread chapter count on covers")
+        unread_row.set_active(get_db().get_setting("show_unread_badge", "1") == "1")
+        unread_row.connect("notify::active", self._on_show_unread_badge_toggled)
+        lib_group.add(unread_row)
+
+        desktop_notif_row = Adw.SwitchRow(
+            title="Desktop notifications",
+            subtitle="Background update results and download completion, even while minimized",
+        )
+        desktop_notif_row.set_active(get_db().get_setting("desktop_notifications_enabled", "1") == "1")
+        desktop_notif_row.connect("notify::active", self._on_desktop_notifications_toggled)
+        lib_group.add(desktop_notif_row)
+
+    def _build_sources_settings_page(self, content):
         # Local source
         local_group = Adw.PreferencesGroup(
             title="Local source",
@@ -460,6 +694,7 @@ class MainWindow(Adw.ApplicationWindow):
         self._add_repo_row = add_repo_row
         self._refresh_repo_rows()
 
+    def _build_tracking_settings_page(self, content):
         # Tracking group: per-service client ID and login
         track_group = Adw.PreferencesGroup(
             title="Tracking",
@@ -491,6 +726,19 @@ class MainWindow(Adw.ApplicationWindow):
         self._tracking_queue_row.add_suffix(retry_btn)
         track_group.add(self._tracking_queue_row)
 
+        pull_row = Adw.SwitchRow(
+            title="Sync from trackers after scheduled updates",
+            subtitle="Bring in status, score and progress changed on AniList or MyAnimeList",
+        )
+        pull_row.set_active(get_db().get_setting("tracker_pull_after_update", "1") == "1")
+        pull_row.connect(
+            "notify::active",
+            lambda row, *_: get_db().set_setting(
+                "tracker_pull_after_update", "1" if row.get_active() else "0"
+            ),
+        )
+        track_group.add(pull_row)
+
         storage_row = Adw.ActionRow(title="Token storage")
         storage_label = Gtk.Label(label=getattr(manager, "credentials", None)
                                   and manager.credentials.backend_name or "unknown")
@@ -505,23 +753,95 @@ class MainWindow(Adw.ApplicationWindow):
         track_group.add(storage_row)
         self._refresh_tracking_queue_label()
 
+    def _build_about_settings_page(self, content):
         # About group
         about_group = Adw.PreferencesGroup(title="About")
         content.append(about_group)
 
         about_row = Adw.ActionRow(title="Mihon for Linux")
-        about_row.set_subtitle("Version 1.0.0 – Built with GTK4 + Python")
+        from .. import __version__
+        about_row.set_subtitle(f"Version {__version__} – Built with GTK4 + Python")
         about_group.add(about_row)
-
-        scroll.set_child(content)
-        box.append(scroll)
-        return box
 
     def _on_auto_update_toggled(self, row, _pspec):
         from ..core.database import get_db
 
         value = "1" if row.get_active() else "0"
         get_db().set_setting("auto_update_library", value)
+        self._updates_view.reschedule()
+
+    def _on_update_interval_changed(self, row, _pspec):
+        get_db().set_setting(
+            "library_update_interval_hours", self._UPDATE_INTERVAL_VALUES[row.get_selected()]
+        )
+        self._updates_view.reschedule()
+
+    def _on_skip_dropped_toggled(self, row, _pspec):
+        value = "1" if row.get_active() else "0"
+        get_db().set_setting("smart_update_skip_dropped", value)
+
+    def _on_category_excluded_toggled(self, row, _pspec, category_id: int):
+        try:
+            excluded = set(json.loads(
+                get_db().get_setting("smart_update_excluded_categories", "[]")
+            ))
+        except ValueError:
+            excluded = set()
+        if row.get_active():
+            excluded.add(category_id)
+        else:
+            excluded.discard(category_id)
+        get_db().set_setting("smart_update_excluded_categories", json.dumps(sorted(excluded)))
+
+    def _on_show_unread_badge_toggled(self, row, _pspec):
+        value = "1" if row.get_active() else "0"
+        get_db().set_setting("show_unread_badge", value)
+        self._library_view.reload()
+
+    def _on_desktop_notifications_toggled(self, row, _pspec):
+        value = "1" if row.get_active() else "0"
+        get_db().set_setting("desktop_notifications_enabled", value)
+
+    def _on_choose_download_dir(self, button):
+        dialog = Gtk.FileDialog()
+        dialog.set_title("Choose the download folder")
+        current = get_db().get_setting("download_dir", str(DOWNLOADS_DIR))
+        try:
+            dialog.set_initial_folder(Gio.File.new_for_path(current))
+        except Exception:
+            pass
+        dialog.select_folder(self, None, self._on_download_dir_chosen)
+
+    def _on_download_dir_chosen(self, dialog, result):
+        try:
+            folder = dialog.select_folder_finish(result)
+        except Exception as e:
+            if "Dismissed" not in str(e):
+                notify_error(self, str(e))
+            return
+        if folder is None:
+            return
+
+        path = folder.get_path()
+        get_db().set_setting("download_dir", path)
+        self._dl_path_row.set_subtitle(path)
+        notify(self, f"Downloads will be saved to {path}.")
+
+    def _on_max_downloads_changed(self, row, _pspec):
+        get_db().set_setting("max_simultaneous_downloads", str(int(row.get_value())))
+
+    def _on_default_direction_changed(self, row, _pspec):
+        get_db().set_setting("reading_direction", self._DIRECTION_VALUES[row.get_selected()])
+
+    def _on_default_layout_changed(self, row, _pspec):
+        get_db().set_setting("page_layout", self._LAYOUT_VALUES[row.get_selected()])
+
+    def _on_default_background_changed(self, row, _pspec):
+        get_db().set_setting("reader_background", self._BG_VALUES[row.get_selected()])
+
+    def _on_theme_changed(self, row, _pspec):
+        get_db().set_setting("appearance_theme", self._THEME_VALUES[row.get_selected()])
+        apply_appearance_theme()
 
     def _refresh_downloads(self):
         from ..core.downloader import get_download_manager
@@ -544,6 +864,8 @@ class MainWindow(Adw.ApplicationWindow):
             self._downloads_list.append(row)
             return
 
+        pending_order = dm.pending_order()
+
         for item in items:
             row = Gtk.ListBoxRow()
             row.set_activatable(False)
@@ -553,20 +875,137 @@ class MainWindow(Adw.ApplicationWindow):
             box.set_margin_top(8)
             box.set_margin_bottom(8)
 
+            header = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
             title = Gtk.Label(
                 label=f"{item.manga.title} – Ch.{item.chapter.chapter_number:g}"
             )
             title.set_xalign(0)
-            box.append(title)
+            title.set_hexpand(True)
+            title.set_ellipsize(Pango.EllipsizeMode.END)
+            header.append(title)
 
-            progress = Gtk.ProgressBar()
-            progress.set_fraction(item.progress)
-            progress.set_text(f"{item.pages_downloaded}/{item.total_pages} pages")
-            progress.set_show_text(True)
-            box.append(progress)
+            chapter_id = item.chapter.id
+            if item.status == DownloadStatus.QUEUED and chapter_id in pending_order:
+                position = pending_order.index(chapter_id)
+
+                up_btn = Gtk.Button(icon_name="go-up-symbolic")
+                up_btn.add_css_class("flat")
+                up_btn.set_tooltip_text("Move up")
+                up_btn.set_sensitive(position > 0)
+                up_btn.connect("clicked", self._on_move_download_up, chapter_id)
+                header.append(up_btn)
+
+                down_btn = Gtk.Button(icon_name="go-down-symbolic")
+                down_btn.add_css_class("flat")
+                down_btn.set_tooltip_text("Move down")
+                down_btn.set_sensitive(position < len(pending_order) - 1)
+                down_btn.connect("clicked", self._on_move_download_down, chapter_id)
+                header.append(down_btn)
+
+                if position > 0:
+                    top_btn = Gtk.Button(label="Prioritize")
+                    top_btn.add_css_class("flat")
+                    top_btn.set_tooltip_text("Download this one next")
+                    top_btn.connect("clicked", self._on_prioritize_download, chapter_id)
+                    header.append(top_btn)
+
+            if item.status in (DownloadStatus.QUEUED, DownloadStatus.DOWNLOADING):
+                cancel_btn = Gtk.Button(label="Cancel")
+                cancel_btn.add_css_class("flat")
+                cancel_btn.connect("clicked", self._on_cancel_download, chapter_id)
+                header.append(cancel_btn)
+            elif item.status == DownloadStatus.ERROR:
+                retry_btn = Gtk.Button(label="Retry")
+                retry_btn.add_css_class("flat")
+                retry_btn.connect("clicked", self._on_retry_download, chapter_id)
+                header.append(retry_btn)
+                remove_btn = Gtk.Button(label="Remove")
+                remove_btn.add_css_class("flat")
+                remove_btn.connect("clicked", self._on_remove_download, chapter_id)
+                header.append(remove_btn)
+            elif item.status == DownloadStatus.DOWNLOADED:
+                remove_btn = Gtk.Button(label="Remove")
+                remove_btn.add_css_class("flat")
+                remove_btn.connect("clicked", self._on_remove_download, chapter_id)
+                header.append(remove_btn)
+            box.append(header)
+
+            if item.status == DownloadStatus.ERROR:
+                err = Gtk.Label(label=item.error_message or "Download failed")
+                err.set_xalign(0)
+                err.add_css_class("error")
+                err.add_css_class("caption")
+                box.append(err)
+            elif item.status == DownloadStatus.DOWNLOADED:
+                done = Gtk.Label(label="Downloaded")
+                done.set_xalign(0)
+                done.add_css_class("dim-label")
+                done.add_css_class("caption")
+                box.append(done)
+            else:
+                progress = Gtk.ProgressBar()
+                progress.set_fraction(item.progress)
+                progress.set_text(f"{item.pages_downloaded}/{item.total_pages} pages")
+                progress.set_show_text(True)
+                box.append(progress)
 
             row.set_child(box)
             self._downloads_list.append(row)
+
+    def _on_move_download_up(self, _button, chapter_id: int):
+        from ..core.downloader import get_download_manager
+        get_download_manager().move_up(chapter_id)
+        self._refresh_downloads()
+
+    def _on_move_download_down(self, _button, chapter_id: int):
+        from ..core.downloader import get_download_manager
+        get_download_manager().move_down(chapter_id)
+        self._refresh_downloads()
+
+    def _on_prioritize_download(self, _button, chapter_id: int):
+        from ..core.downloader import get_download_manager
+        get_download_manager().move_to_front(chapter_id)
+        self._refresh_downloads()
+
+    def _on_cancel_download(self, _button, chapter_id: int):
+        from ..core.downloader import get_download_manager
+        get_download_manager().cancel(chapter_id)
+        self._refresh_downloads()
+
+    def _on_retry_download(self, _button, chapter_id: int):
+        from ..core.downloader import get_download_manager
+        get_download_manager().retry(chapter_id)
+        self._refresh_downloads()
+
+    def _on_remove_download(self, _button, chapter_id: int):
+        from ..core.downloader import get_download_manager
+        get_download_manager().remove(chapter_id)
+        self._refresh_downloads()
+
+    def _on_download_status_changed(self, chapter_id: int, status):
+        # Fires from a worker thread; GTK/Gio calls must happen on the main loop.
+        GLib.idle_add(self._notify_download_status, chapter_id, status)
+
+    def _notify_download_status(self, chapter_id: int, status) -> bool:
+        if status not in (DownloadStatus.DOWNLOADED, DownloadStatus.ERROR):
+            return False
+
+        from ..core.downloader import get_download_manager
+        item = get_download_manager().get_item(chapter_id)
+        if item is None:
+            return False
+
+        label = f"{item.manga.title} – Ch.{item.chapter.chapter_number:g}"
+        notification_id = f"download-{chapter_id}"
+        if status == DownloadStatus.DOWNLOADED:
+            notify_desktop(self, "Download complete", label, notification_id=notification_id)
+        else:
+            notify_desktop(
+                self, "Download failed",
+                f"{label}: {item.error_message or 'unknown error'}",
+                notification_id=notification_id,
+            )
+        return False
 
     # ── Local source ──────────────────────────────────────────────────────
 
@@ -1048,8 +1487,12 @@ class MainWindow(Adw.ApplicationWindow):
 
         reader_group = Gtk.ShortcutsGroup(title="Reader")
         for title, accelerator in (
-            ("Next page", "Right space"),
-            ("Previous page", "Left BackSpace"),
+            ("Next page (direction-aware)", "Right d space Page_Down"),
+            ("Previous page (direction-aware)", "Left a BackSpace Page_Up"),
+            ("First / last page", "Home End"),
+            ("Next / previous chapter", "n p"),
+            ("Zoom in / out / reset", "plus minus 0"),
+            ("Toggle fullscreen", "f F11"),
             ("Close the reader", "Escape"),
         ):
             reader_group.add_shortcut(
@@ -1120,15 +1563,87 @@ class MainWindow(Adw.ApplicationWindow):
             return
 
         path = Path(file.get_path())
-        busy = self._busy_dialog(
-            "Importing backup",
-            f"Reading {path.name}. This can take a while for a large library.",
+        busy = self._busy_dialog("Reading backup", f"Checking {path.name}.")
+
+        def work():
+            from ..core.tachibk_importer import preview_backup
+            try:
+                preview = preview_backup(path)
+            except Exception as exc:
+                GLib.idle_add(self._on_import_previewed, busy, path, None, str(exc))
+                return
+            GLib.idle_add(self._on_import_previewed, busy, path, preview, None)
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def _on_import_previewed(self, busy, path, preview, error):
+        busy.close()
+        if error is not None:
+            self._show_message("Cannot restore this file", error)
+            return False
+
+        lines = [
+            f"{preview.manga} manga ({preview.new_manga} new, "
+            f"{preview.existing_manga} already in your database)",
+            f"{preview.chapters} chapters, {preview.read_chapters} marked read",
+            f"{preview.categories} categories",
+        ]
+        dialog = Adw.MessageDialog(
+            transient_for=self,
+            modal=True,
+            heading=f"Restore {path.name}?",
+            body="\n".join(lines),
         )
+
+        choice_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
+        merge_btn = Gtk.CheckButton(label="Merge: keep my data, add what is missing")
+        merge_btn.set_active(True)
+        overwrite_btn = Gtk.CheckButton(label="Overwrite: the backup replaces my details and progress")
+        overwrite_btn.set_group(merge_btn)
+        choice_box.append(merge_btn)
+        choice_box.append(overwrite_btn)
+        if preview.existing_manga == 0:
+            # Nothing to conflict with, so the choice would be meaningless.
+            choice_box.set_visible(False)
+        dialog.set_extra_child(choice_box)
+
+        dialog.add_response("cancel", "Cancel")
+        dialog.add_response("restore", "Restore")
+        dialog.set_response_appearance("restore", Adw.ResponseAppearance.SUGGESTED)
+        dialog.set_default_response("restore")
+        dialog.set_close_response("cancel")
+
+        def on_response(_dialog, response):
+            if response != "restore":
+                return
+            from ..core.tachibk_importer import ConflictMode
+            mode = ConflictMode.OVERWRITE if overwrite_btn.get_active() else ConflictMode.MERGE
+            self._run_import(path, mode)
+
+        dialog.connect("response", on_response)
+        dialog.present()
+        return False
+
+    def _run_import(self, path, mode):
+        progress_bar = Gtk.ProgressBar()
+        progress_bar.set_show_text(True)
+        progress_bar.set_text("Starting…")
+        busy = Adw.MessageDialog(
+            transient_for=self,
+            modal=True,
+            heading="Restoring backup",
+            body=f"Restoring {path.name}. Do not close the app.",
+        )
+        busy.set_extra_child(progress_bar)
+        busy.present()
+
+        def on_progress(done, total):
+            GLib.idle_add(self._set_import_progress, progress_bar, done, total)
 
         def work():
             from ..core.tachibk_importer import import_tachibk
             try:
-                result = import_tachibk(path, apply=True)
+                result = import_tachibk(path, apply=True, mode=mode, progress=on_progress)
             except Exception as exc:
                 GLib.idle_add(self._on_import_done, busy, None, str(exc))
                 return
@@ -1136,19 +1651,32 @@ class MainWindow(Adw.ApplicationWindow):
 
         threading.Thread(target=work, daemon=True).start()
 
+    @staticmethod
+    def _set_import_progress(progress_bar, done, total):
+        progress_bar.set_fraction(done / total if total else 1.0)
+        progress_bar.set_text(f"{done} of {total} manga")
+        return False
+
     def _on_import_done(self, busy, result, error):
         busy.close()
         if error is not None:
             self._show_message("Import failed", error)
             return False
-        if result is None or not result.ok:
-            errors = "\n".join(result.errors) if result else "Unknown error"
-            self._show_message("Import failed", errors)
+        if result is None:
+            self._show_message("Import failed", "Unknown error")
             return False
-
-        self._show_message("Import complete", result.summary())
-        notify(self, result.summary())
-        self._refresh_after_import()
+        if result.errors:
+            shown = result.errors[:10]
+            extra = len(result.errors) - len(shown)
+            body = result.summary() + "\n\n" + "\n".join(shown)
+            if extra > 0:
+                body += f"\n…and {extra} more (see the log)"
+            self._show_message("Restore finished with errors", body)
+        else:
+            self._show_message("Restore complete", result.summary())
+            notify(self, result.summary())
+        if result.applied:
+            self._refresh_after_import()
         return False
 
     def _refresh_after_import(self):
