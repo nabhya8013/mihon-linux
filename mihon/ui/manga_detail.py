@@ -13,7 +13,7 @@ import webbrowser
 from urllib.parse import urljoin
 from ..core.database import get_db
 from ..core.models import Manga, Chapter, ReadingStatus, DownloadStatus, SearchFilter
-from ..core import disk_cache, image_loader
+from ..core import disk_cache, fetch_policy, image_loader
 from ..core.tracking import (
     ALL_STATUSES,
     STATUS_LABELS,
@@ -168,6 +168,21 @@ class MangaDetailView(Gtk.Box):
         status_lbl.add_css_class("caption")
         status_box.append(status_lbl)
         action_box.append(status_box)
+
+        # Refresh details and chapters from the source
+        refresh_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
+        refresh_btn = Gtk.Button(icon_name="view-refresh-symbolic")
+        refresh_btn.add_css_class("circular")
+        refresh_btn.set_size_request(48, 48)
+        refresh_btn.set_halign(Gtk.Align.CENTER)
+        refresh_btn.set_tooltip_text("Fetch the latest details and chapters from the source")
+        refresh_btn.connect("clicked", self._on_refresh_clicked)
+        self._refresh_btn = refresh_btn
+        refresh_box.append(refresh_btn)
+        refresh_lbl = Gtk.Label(label="Refresh")
+        refresh_lbl.add_css_class("caption")
+        refresh_box.append(refresh_lbl)
+        action_box.append(refresh_box)
 
         # WebView / Browse
         web_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
@@ -520,32 +535,7 @@ class MangaDetailView(Gtk.Box):
             btn.set_active(mode == "all")
         self._selected_chapter_ids = set()
         self._set_chapter_selection_mode(False)
-        self._manga_title.set_text(manga.title)
-        self._author_label.set_text(manga.author or "Unknown Author")
-        self._status_label.set_markup(
-            f"<b>Status:</b> {manga.status.title() if manga.status else 'Unknown'}"
-        )
-        self._description.set_text(manga.description or "No description available.")
-        if manga.score:
-            self._score_label.set_text(f"⭐ {manga.score:.1f}/10")
-        else:
-            self._score_label.set_text("")
-
-        # Genres
-        child = self._genre_box.get_first_child()
-        while child:
-            nxt = child.get_next_sibling()
-            self._genre_box.remove(child)
-            child = nxt
-        for genre in manga.genres[:10]:
-            chip = Gtk.Label(label=genre)
-            chip.add_css_class("tag")
-            chip.add_css_class("caption")
-            chip.set_margin_start(4)
-            chip.set_margin_end(4)
-            chip.set_margin_top(2)
-            chip.set_margin_bottom(2)
-            self._genre_box.append(chip)
+        self._render_info(manga)
 
         self._update_library_button()
         self._refresh_tracking_summary()
@@ -600,53 +590,155 @@ class MangaDetailView(Gtk.Box):
         # Set background cover (it will be scaled by the widget because of COVER fit)
         self._bg_cover.set_pixbuf(pixbuf)
 
-    def _load_details(self):
+    def _load_details(self, force: bool = False):
+        """
+        Show what is stored, then go to the source only when it is worth it.
+
+        Stored chapters render at once. The source is contacted when the manga
+        was never fetched, has no chapters, or the stored copy has aged out
+        (see ``mihon.core.fetch_policy``); ``force`` skips those checks and is
+        what the Refresh button uses.
+        """
         manga = self._manga
         ext = get_registry().get(manga.source_id)
         if not ext:
             return
 
+        # A newer load (another manga opened, or Refresh pressed again) makes
+        # this one's results stale, and they must not overwrite the page.
+        self._load_token = token = getattr(self, "_load_token", 0) + 1
+        self._set_refreshing(force)
+
+        def current():
+            return self._load_token == token
+
+        def deliver(callback, *args):
+            def run():
+                if current():
+                    callback(*args)
+                return False
+            GLib.idle_add(run)
+
         def fetch():
             try:
-                # A manga already initialized carries everything the details
-                # call would return, so skip the round trip and go straight to
-                # chapters. This is Android's SManga.initialized behaviour.
-                if manga.initialized and manga.id:
-                    updated = manga
-                else:
-                    updated = ext.get_manga_details(manga)
+                # Browse and search hand over a manga with no row id and no
+                # fetch history. Look the stored copy up so a series that was
+                # already fetched is not fetched again.
+                target = manga
+                if manga.id is None:
+                    row = self._db.get_manga_by_source(manga.source_id, manga.source_manga_id)
+                    if row is not None:
+                        # Use the stored copy whole: it carries the details a
+                        # listing lacks, so the page needs no fetch to fill in.
+                        row.cover_local_path = row.cover_local_path or manga.cover_local_path
+                        target = row
+
+                cached = self._db.get_chapters(target.id, sort=self._chapter_sort) if target.id else []
+                want_details = fetch_policy.needs_details(target, force=force)
+                want_chapters = fetch_policy.needs_chapters(
+                    target,
+                    cached_count=len(cached),
+                    cacheable=getattr(ext, "cache_chapters", True),
+                    force=force,
+                )
+                if cached:
+                    deliver(self._on_details_loaded, target, cached)
+                if not (want_details or want_chapters):
+                    deliver(self._on_load_finished, None)
+                    return
+
+                if want_details:
+                    updated = ext.get_manga_details(target)
                     updated.initialized = True
-                updated.in_library = manga.in_library
-                updated.reading_status = manga.reading_status
-                updated.added_at = manga.added_at
-                if manga.cover_local_path:
-                    updated.cover_local_path = manga.cover_local_path
-                # Update DB
+                else:
+                    updated = target
+                updated.in_library = target.in_library
+                updated.reading_status = target.reading_status
+                updated.added_at = target.added_at
+                if target.cover_local_path:
+                    updated.cover_local_path = target.cover_local_path
                 db_id = self._db.upsert_manga(updated)
                 updated.id = db_id
+                if want_details:
+                    self._db.mark_details_fetched(db_id)
 
-                # Chapters are always re-fetched: unlike details, the list
-                # grows as the series updates.
-                chapters = ext.get_chapters(updated)
-                logger.debug("extension returned %d chapters", len(chapters))
-                for ch in chapters:
-                    ch.manga_id = db_id
-                self._db.upsert_chapters(chapters)
-                # Re-fetch from DB to get IDs
+                if want_chapters:
+                    chapters = ext.get_chapters(updated)
+                    logger.debug("extension returned %d chapters", len(chapters))
+                    for ch in chapters:
+                        ch.manga_id = db_id
+                    self._db.upsert_chapters(chapters)
+                    # An empty answer next to stored chapters is more likely a
+                    # failed request than a series that lost every chapter, so
+                    # it does not count as a fetch and is retried next visit.
+                    if chapters:
+                        self._db.mark_chapters_fetched(db_id)
+                    elif cached:
+                        deliver(self._on_load_finished, "The source returned no chapters; showing the saved list.")
+
                 db_chapters = self._db.get_chapters(db_id, sort=self._chapter_sort)
                 logger.debug("db returned %d chapters after upsert", len(db_chapters))
-                GLib.idle_add(self._on_details_loaded, updated, db_chapters)
+                deliver(self._on_details_loaded, updated, db_chapters)
+                deliver(self._on_load_finished, None)
             except Exception as e:
                 logger.error("error loading details: %s", e)
-                # Still try to show cached chapters
-                if manga.id:
-                    db_chapters = self._db.get_chapters(manga.id)
-                    GLib.idle_add(self._on_details_loaded, manga, db_chapters)
+                if target.id:
+                    deliver(self._on_details_loaded, target, self._db.get_chapters(target.id))
+                # A background refresh that fails (offline, say) is only logged:
+                # the saved copy is already on screen. Pressing Refresh is an
+                # explicit request, so that failure is reported.
+                deliver(self._on_load_finished, f"Could not refresh: {e}" if force else None)
 
         threading.Thread(target=fetch, daemon=True).start()
 
+    def _set_refreshing(self, refreshing: bool):
+        btn = getattr(self, "_refresh_btn", None)
+        if btn is not None:
+            btn.set_sensitive(not refreshing)
+
+    def _on_load_finished(self, message):
+        self._set_refreshing(False)
+        if message:
+            notify_error(self, message)
+
+    def _on_refresh_clicked(self, *_):
+        if self._manga is not None:
+            self._load_details(force=True)
+
+    def _render_info(self, manga: Manga):
+        """Fill the title, author, status, description, score and genre chips."""
+        self._manga_title.set_text(manga.title)
+        self._author_label.set_text(manga.author or "Unknown Author")
+        self._status_label.set_markup(
+            f"<b>Status:</b> {manga.status.title() if manga.status else 'Unknown'}"
+        )
+        self._description.set_text(manga.description or "No description available.")
+        if manga.score:
+            self._score_label.set_text(f"⭐ {manga.score:.1f}/10")
+        else:
+            self._score_label.set_text("")
+
+        # Genres
+        child = self._genre_box.get_first_child()
+        while child:
+            nxt = child.get_next_sibling()
+            self._genre_box.remove(child)
+            child = nxt
+        for genre in manga.genres[:10]:
+            chip = Gtk.Label(label=genre)
+            chip.add_css_class("tag")
+            chip.add_css_class("caption")
+            chip.set_margin_start(4)
+            chip.set_margin_end(4)
+            chip.set_margin_top(2)
+            chip.set_margin_bottom(2)
+            self._genre_box.append(chip)
+
     def _on_details_loaded(self, manga: Manga, chapters):
         self._manga = manga
+        # The page was first filled from a listing that carries only a title
+        # and cover; the details call is what supplies the rest.
+        self._render_info(manga)
         self._update_web_button_state()
         self._chapters = chapters
         self._render_chapters()

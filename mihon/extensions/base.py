@@ -10,6 +10,11 @@ from ..core.models import Manga, Chapter, Page, SearchFilter, ExtensionInfo
 class Extension(ABC):
     """Base class for all manga source extensions."""
 
+    # Whether a fetched chapter list may be reused until it goes stale. A source
+    # whose listing is cheap and can change underneath us (a folder on disk)
+    # sets this False so the list is read again on every visit.
+    cache_chapters: bool = True
+
     @property
     @abstractmethod
     def info(self) -> ExtensionInfo:

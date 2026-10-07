@@ -49,6 +49,7 @@ tagged release yet, so everything lives under **Unreleased**.
   drag and drop for APK install and category reorder.
 - Download queue controls: cancel, retry, remove, reorder, and move to front;
   configurable download location and worker count.
+- Refresh button on the manga page to fetch details and chapters on demand.
 - Scheduled background library updates (Smart Updates), with per-category
   exclusion.
 - Checkbox multi-select for chapter batch actions.
@@ -77,6 +78,14 @@ tagged release yet, so everything lives under **Unreleased**.
 
 ### Fixed
 
+- The manga page showed no description, author or genres when opened from Browse or
+  search, even after the details call succeeded: the labels were only filled from
+  the listing. They now refresh when details arrive.
+- Opening a manga waited on the network for the chapter list every time. Saved
+  chapters now show immediately and the source is contacted only when the copy is
+  missing or stale (details after 24 hours, chapters after 1 hour). Library updates
+  count as a chapter fetch.
+- Opening a manga from Browse refetched details that were already stored.
 - `.tachibk` import now restores chapters, read progress, and reading history. It
   previously wrote only manga and categories, so every chapter came back unread.
 - Corrupt, empty, or non-backup files are rejected with a clear message instead of

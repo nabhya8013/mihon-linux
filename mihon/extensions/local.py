@@ -121,6 +121,9 @@ class LocalChapter:
 class LocalSource(Extension):
     """A source backed by a directory of archives and image folders."""
 
+    # Reading a folder is cheap, and files can be added behind our back.
+    cache_chapters = False
+
     def __init__(self, db=None, root: Optional[Path] = None):
         self._db = db
         self._root_override = Path(root) if root else None

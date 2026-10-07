@@ -190,6 +190,9 @@ class Database:
         }
         if "initialized" not in manga_columns:
             c.execute("ALTER TABLE manga ADD COLUMN initialized INTEGER DEFAULT 0")
+        for column in ("details_fetched_at", "chapters_fetched_at"):
+            if column not in manga_columns:
+                c.execute(f"ALTER TABLE manga ADD COLUMN {column} REAL")
 
         c.executescript("""
         -- Pending tracker updates that could not be delivered. Drained on the
@@ -403,6 +406,20 @@ class Database:
             int(manga.initialized),
         ))
 
+    def mark_details_fetched(self, manga_id: int, when: Optional[float] = None) -> None:
+        self.conn.execute(
+            "UPDATE manga SET details_fetched_at=? WHERE id=?",
+            (when if when is not None else time.time(), manga_id),
+        )
+        self.conn.commit()
+
+    def mark_chapters_fetched(self, manga_id: int, when: Optional[float] = None) -> None:
+        self.conn.execute(
+            "UPDATE manga SET chapters_fetched_at=? WHERE id=?",
+            (when if when is not None else time.time(), manga_id),
+        )
+        self.conn.commit()
+
     def get_manga_by_id(self, manga_id: int) -> Optional[Manga]:
         row = self.conn.execute("SELECT * FROM manga WHERE id=?", (manga_id,)).fetchone()
         return self._row_to_manga(row) if row else None
@@ -494,6 +511,8 @@ class Database:
         m.url = row["url"] or ""
         m.in_library = bool(row["in_library"])
         m.initialized = bool(row["initialized"])
+        m.details_fetched_at = row["details_fetched_at"]
+        m.chapters_fetched_at = row["chapters_fetched_at"]
         m.reading_status = ReadingStatus(row["reading_status"] or "none")
         m.unread_count = row["unread_count"] or 0
         m.chapter_count = row["chapter_count"] or 0

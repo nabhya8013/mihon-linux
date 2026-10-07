@@ -89,5 +89,26 @@ class LibraryUpdaterFilterTests(unittest.TestCase):
         self.assertEqual(summary.checked_manga, 0)
 
 
+class LibraryUpdaterTimestampTests(LibraryUpdaterFilterTests):
+    """A library update counts as a chapter fetch, so opening a manga right
+    afterwards does not fetch the same list again."""
+
+    def test_successful_fetch_stamps_the_manga(self):
+        from mihon.core.models import Chapter
+
+        class WithChapters:
+            def get_chapters(self, manga):
+                return [Chapter(source_chapter_id="c1", title="1", chapter_number=1.0)]
+
+        with patch.object(self.mod, "get_registry") as get_registry:
+            get_registry.return_value.get.return_value = WithChapters()
+            self.updater.check_updates()
+        self.assertIsNotNone(self.db.get_manga_by_id(self.reading.id).chapters_fetched_at)
+
+    def test_empty_answer_does_not_stamp_the_manga(self):
+        self._run()  # FakeExtension returns no chapters
+        self.assertIsNone(self.db.get_manga_by_id(self.reading.id).chapters_fetched_at)
+
+
 if __name__ == "__main__":
     unittest.main()

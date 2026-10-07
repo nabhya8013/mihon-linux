@@ -90,6 +90,7 @@ class LibraryUpdater:
 
                 if fetched:
                     self._db.upsert_chapters(fetched)
+                    self._db.mark_chapters_fetched(manga.id)
                 self._db.update_unread_count(manga.id)
 
                 if new_chapters:
