@@ -23,33 +23,38 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
-            python3 python3-pip python3-gi python3-gi-cairo python3-protobuf \
-            gir1.2-gtk-4.0 gir1.2-adw-1 \
+            python3-gi python3-gi-cairo gir1.2-gtk-4.0 gir1.2-adw-1 \
             gir1.2-secret-1 libgirepository1.0-dev libcairo2-dev \
             xvfb desktop-file-utils appstream
 
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+
       - name: Install Python dependencies
         run: |
-          python3 -m pip install --upgrade pip
+          python -m pip install --upgrade pip
           pip install pytest
-          # Uninstall conflicting packages
-          pip uninstall -y protobuf google 2>/dev/null || true
-          # Install remaining deps (skip PyGObject)
+          # Remove any system protobuf that might interfere
+          pip uninstall -y protobuf 2>/dev/null || true
+          # PyGObject comes from apt above; installing it from pip as well
+          # would shadow the system typelibs
           grep -vE '^(PyGObject|pygobject|#|\s*$)' requirements.txt > /tmp/ci-requirements.txt
           pip install -r /tmp/ci-requirements.txt
+          # Force install compatible protobuf
+          pip install 'protobuf>=4.25,<5.0' 2>&1 | tail -2
 
       - name: Run tests
         # Several tests build real GTK widgets, so they need a display.
-        # Use system Python with system PyGObject/typelibs
         run: |
-          xvfb-run -a python3 -m pytest tests/ -v
+          xvfb-run -a python -m pytest tests/ -v
         env:
-          PYTHONPATH: ${{ github.workspace }}:/usr/lib/python3/dist-packages:/usr/lib/python3/site-packages
-          GI_TYPELIB_PATH: /usr/lib/x86_64-linux-gnu/girepository-1.0:/usr/lib/girepository-1.0
+          PYTHONPATH: ${{ github.workspace }}:/usr/lib/python3/dist-packages
+          GI_TYPELIB_PATH: /usr/lib/x86_64-linux-gnu/girepository-1.0
 
       - name: Check every module imports
         run: |
-          xvfb-run -a python3 - <<'PY'
+          xvfb-run -a python - <<'PY'
           import importlib, pkgutil
           import mihon
           failed = []
@@ -63,8 +68,8 @@ jobs:
           print("All modules import cleanly.")
           PY
         env:
-          PYTHONPATH: ${{ github.workspace }}:/usr/lib/python3/dist-packages:/usr/lib/python3/site-packages
-          GI_TYPELIB_PATH: /usr/lib/x86_64-linux-gnu/girepository-1.0:/usr/lib/girepository-1.0
+          PYTHONPATH: ${{ github.workspace }}:/usr/lib/python3/dist-packages
+          GI_TYPELIB_PATH: /usr/lib/x86_64-linux-gnu/girepository-1.0
 
   lint:
     name: Lint
