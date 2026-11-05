@@ -54,11 +54,13 @@ class MangaDexExtension(Extension):
 
     def _get(self, path: str, params: dict = None) -> dict:
         """Make a GET request to the MangaDex API."""
-        resp = self._session.get(
-            f"{API_BASE}{path}",
-            params=params or {},
-            timeout=15,
-        )
+        import requests
+        url = f"{API_BASE}{path}"
+        headers = {"Accept": "application/json"}
+        resp = self._session.get(url, params=params or {}, timeout=15, headers=headers)
+        # MangaDex API sometimes returns HTML via impersonated session in some envs; retry plain.
+        if resp.status_code >= 400 or "json" not in (resp.headers.get("content-type") or "").lower():
+            resp = requests.get(url, params=params or {}, timeout=15, headers=headers)
         resp.raise_for_status()
         return resp.json()
 
@@ -347,16 +349,25 @@ class MangaDexExtension(Extension):
         page_filenames = ch_data.get("data") or []       # Full quality
         data_saver = ch_data.get("dataSaver") or []       # Compressed
 
+        # Some chapter entries (external/unavailable) return empty page lists;
+        # try data-saver as fallback and report clearly.
+        if not page_filenames and data_saver:
+            page_filenames = data_saver
+            use_saver = True
+        else:
+            use_saver = False
+
         pages = []
         for i, filename in enumerate(page_filenames):
-            full_url = f"{base_url}/data/{ch_hash}/{filename}"
+            quality = "data-saver" if use_saver else "data"
+            full_url = f"{base_url}/{quality}/{ch_hash}/{filename}"
             saver_url = ""
-            if i < len(data_saver):
+            if not use_saver and i < len(data_saver):
                 saver_url = f"{base_url}/data-saver/{ch_hash}/{data_saver[i]}"
 
             pages.append(Page(
                 index=i,
-                url=saver_url or full_url,
+                url=full_url,
                 image_url=full_url,
             ))
 
