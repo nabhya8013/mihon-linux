@@ -71,3 +71,4 @@ payload.json
 # Local-only strategic working notes (see docs/README.md)
 port_parity_roadmap.md
 PORT_PARITY_IMPLEMENTATION_LOG.md
+test-logs/*.json
