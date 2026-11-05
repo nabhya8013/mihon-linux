@@ -135,7 +135,9 @@ class AllMangaExtension(Extension):
         resp.raise_for_status()
         data = resp.json()
         if "errors" in data and "data" not in data:
-            raise Exception(f"GraphQL error: {data['errors'][0].get('message', 'unknown')}")
+            msg = (data.get('errors') or [{}])[0].get('message','unknown')
+            if 'NEED_CAPTCHA' in str(msg).upper(): raise Exception('AllManga requires captcha verification for chapter pages. Solve captcha in browser/WebView, then retry.')
+            raise Exception(f"GraphQL error: {msg}")
         return data.get("data") or {}
 
     def _resolve_thumbnail(self, path: str) -> str:
