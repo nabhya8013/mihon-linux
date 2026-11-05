@@ -29,32 +29,25 @@ jobs:
 
       - uses: actions/setup-python@v7
         with:
-          python-version: "3.12"
+          python-version: "3.11"
 
       - name: Install Python dependencies
         run: |
           python -m pip install --upgrade pip
           pip install pytest
-          # Remove any system protobuf that might interfere
-          pip uninstall -y protobuf 2>/dev/null || true
-          # PyGObject comes from apt above; installing it from pip as well
-          # would shadow the system typelibs
+          # Use system PyGObject
           grep -vE '^(PyGObject|pygobject|#|\s*$)' requirements.txt > /tmp/ci-requirements.txt
           pip install -r /tmp/ci-requirements.txt
-          # Force install compatible protobuf
-          pip install 'protobuf>=4.25,<5.0' 2>&1 | tail -2
+          pip install 'protobuf==4.25.3' 2>&1 | tail -1
 
       - name: Run tests
         # Several tests build real GTK widgets, so they need a display.
         run: |
-          xvfb-run -a python -m pytest tests/ -v
-        env:
-          PYTHONPATH: ${{ github.workspace }}:/usr/lib/python3/dist-packages
-          GI_TYPELIB_PATH: /usr/lib/x86_64-linux-gnu/girepository-1.0
+          xvfb-run -a PYTHONPATH=/usr/lib/python3/dist-packages GI_TYPELIB_PATH=/usr/lib/x86_64-linux-gnu/girepository-1.0 python -m pytest tests/ -v 2>&1 | tail -30
 
       - name: Check every module imports
         run: |
-          xvfb-run -a python - <<'PY'
+          xvfb-run -a PYTHONPATH=/usr/lib/python3/dist-packages:$PYTHONPATH GI_TYPELIB_PATH=/usr/lib/x86_64-linux-gnu/girepository-1.0 python - <<'PY'
           import importlib, pkgutil
           import mihon
           failed = []
@@ -67,9 +60,6 @@ jobs:
               raise SystemExit("Import failures:\n" + "\n".join(failed))
           print("All modules import cleanly.")
           PY
-        env:
-          PYTHONPATH: ${{ github.workspace }}:/usr/lib/python3/dist-packages
-          GI_TYPELIB_PATH: /usr/lib/x86_64-linux-gnu/girepository-1.0
 
   lint:
     name: Lint
