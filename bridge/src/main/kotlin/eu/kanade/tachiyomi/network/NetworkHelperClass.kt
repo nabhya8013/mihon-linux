@@ -9,6 +9,7 @@ import kotlinx.serialization.json.Json
 import okhttp3.Interceptor
 import okhttp3.OkHttpClient
 import eu.kanade.tachiyomi.network.interceptor.CloudflareInterceptor
+import eu.kanade.tachiyomi.network.interceptor.BrowserHeadersInterceptor
 import eu.kanade.tachiyomi.network.interceptor.UncaughtExceptionInterceptor
 import eu.kanade.tachiyomi.network.interceptor.UserAgentInterceptor
 
@@ -27,15 +28,11 @@ class NetworkHelper {
     val client: OkHttpClient by lazy {
         OkHttpClient.Builder()
             .cookieJar(cookieJar)
-            // Must be first: extensions-lib checks for it before issuing any
-            // request and aborts the call when it is missing.
             .addInterceptor(UncaughtExceptionInterceptor())
+            .addInterceptor(BrowserHeadersInterceptor())
             .addInterceptor(UserAgentInterceptor())
             .addInterceptor(CloudflareInterceptor())
             .apply {
-                // Opt-in wire log: MIHON_HTTP_LOG=1 prints every extension
-                // request/response to stderr. Invaluable when a source returns
-                // an empty list and gives no other clue why.
                 if (System.getenv("MIHON_HTTP_LOG") == "1") {
                     addNetworkInterceptor(RequestLogInterceptor())
                 }
@@ -43,6 +40,8 @@ class NetworkHelper {
             .connectTimeout(30, java.util.concurrent.TimeUnit.SECONDS)
             .readTimeout(30, java.util.concurrent.TimeUnit.SECONDS)
             .writeTimeout(30, java.util.concurrent.TimeUnit.SECONDS)
+            .followRedirects(true)
+            .followSslRedirects(true)
             .build()
     }
 

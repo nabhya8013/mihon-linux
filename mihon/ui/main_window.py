@@ -43,6 +43,11 @@ class MainWindow(Adw.ApplicationWindow):
         self._setup_shortcuts()
         self._challenge_solver = WebKitCookieSolver(self)
         set_challenge_solver(self._challenge_solver.solve)
+        try:
+            from ..core.challenge_bridge import get_challenge_bridge
+            get_challenge_bridge().set_solver(self._challenge_solver.solve)
+        except Exception as exc:
+            logger.warning("Could not register bridge challenge solver: %s", exc)
 
         from ..core.downloader import get_download_manager
         get_download_manager().on_status(self._on_download_status_changed)

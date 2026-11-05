@@ -50,7 +50,10 @@ class CloudflareInterceptor(
     override fun intercept(chain: Interceptor.Chain): Response {
         val request = chain.request()
         val response = chain.proceed(request)
-        if (response.code !in ANTI_BOT_CODES) {
+        val code = response.code
+        val looksLikeChallenge = code in ANTI_BOT_CODES ||
+            (code in HARD_BLOCK_CODES && isLikelyBrowserChallenge(response))
+        if (!looksLikeChallenge) {
             return response
         }
         if (challengeDir == null) {
@@ -215,7 +218,20 @@ class CloudflareInterceptor(
         val updated_at: Double = 0.0,
     )
 
+
+    private fun isLikelyBrowserChallenge(response: Response): Boolean {
+        val server = response.header("Server") ?: ""
+        val cf = response.header("cf-mitigated") ?: response.header("CF-RAY") ?: ""
+        val bodyHint = runCatching { response.peekBody(2048).string().lowercase() }.getOrDefault("")
+        return server.contains("cloudflare", true) || cf.isNotBlank() ||
+            bodyHint.contains("just a moment") || bodyHint.contains("cf-chl") ||
+            bodyHint.contains("challenge-platform") || bodyHint.contains("captcha")
+    }
+
     companion object {
-        val ANTI_BOT_CODES: Set<Int> = setOf(403, 503)
+        // 403 is often a hard block/WAF (not a browser challenge) and can cause
+        // false challenge prompts; treat it as anti-bot only when headers suggest CF.
+        val ANTI_BOT_CODES: Set<Int> = setOf(503, 429)
+        val HARD_BLOCK_CODES: Set<Int> = setOf(403)
     }
 }

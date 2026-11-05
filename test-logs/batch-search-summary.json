@@ -1,0 +1,31 @@
+{
+  "total": 200,
+  "found_any": 200,
+  "not_found": 0,
+  "source_errors": 0,
+  "rows_with_chapters": 230,
+  "rows_with_pages_ok": 216,
+  "notes": [
+    "Batch completed (200/200) using resume-capable runner; logs: batch-search.log/console.log",
+    "Big chapter-count mismatches vs AniList are expected in many cases (different scanlation groups, part splits, source-specific chapter granularity, or matching a different edition). Manual spot-check recommended for flagged titles.",
+    "Mangahere page fetch works after QuickJS evaluate(script) overload (bridge rebuilt).",
+    "MangaDex builtin fixed to prefer JSON/plain fallback when impersonated session returns HTML; external/unavailable chapters may still yield 0 pages."
+  ],
+  "big_mismatches_sample": [
+    ["Chainsaw Man", 232, 390],
+    ["Solo Leveling", 201, 281],
+    ["Jujutsu Kaisen", 272, 477],
+    ["My Hero Academia", 432, 41],
+    ["The Promised Neverland", 181, 7],
+    ["Kaguya-sama: Love is War", 281, 80],
+    ["Kaiju No.8", 129, 12],
+    ["JoJo's Bizarre Adventure: Part 7–Steel Ball Run", 95, 24],
+    ["Bastard", 94, 155],
+    ["Homunculus", 166, 15],
+    ["The Greatest Estate Developer", 222, 13],
+    ["BLAME!", 66, 10],
+    ["The Horizon", 21, 34],
+    ["Delicious in Dungeon", 111, 3],
+    ["GTO: Great Teacher Onizuka", 208, 25]
+  ]
+}

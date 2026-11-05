@@ -75,6 +75,7 @@ class CloudflareInterceptorTest {
         val chain = FakeChain(
             Request.Builder().url("https://example.test/protected").build(),
             responseCode = 403,
+            responseHeaders = mapOf("Server" to "cloudflare", "CF-RAY" to "x"),
             responseBodies = listOf("blocked", "unblocked"),
         )
         launchSolverAfterDelay(delayMs = 50)
@@ -231,6 +232,7 @@ class CloudflareInterceptorTest {
         private val originalRequest: Request,
         private val responseCode: Int,
         responseBodies: List<String>,
+        private val responseHeaders: Map<String, String> = emptyMap(),
         private val retryResponseCode: Int = 200,
     ) : Interceptor.Chain {
         private val bodies = responseBodies
@@ -253,13 +255,13 @@ class CloudflareInterceptorTest {
             if (request !== originalRequest) {
                 requests.add(request)
             }
-            return Response.Builder()
+            val b = Response.Builder()
                 .request(request)
                 .protocol(Protocol.HTTP_1_1)
                 .code(code)
                 .message("test")
-                .body(body.toResponseBody())
-                .build()
+            responseHeaders.forEach { (k,v) -> b.header(k,v) }
+            return b.body(body.toResponseBody()).build()
         }
 
         override fun connection() = null
