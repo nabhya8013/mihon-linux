@@ -40,6 +40,7 @@ object ExtensionHandler {
             "extension.image" -> handleImage(params)
             "extension.preferences" -> handlePreferences(params)
             "extension.setPreference" -> handleSetPreference(params)
+            "extension.login" -> handleLogin(params)
             else -> throw NoSuchMethodException(method)
         }
     }
@@ -380,7 +381,6 @@ object ExtensionHandler {
             else -> editor.putString(key, value.jsonPrimitive.content)
         }
         editor.apply()
-
         return buildJsonObject {
             put("saved", true)
             put("key", key)
@@ -502,5 +502,20 @@ object ExtensionHandler {
         if (src is CatalogueSource) put("supportsLatest", src.supportsLatest)
         put("isConfigurable", src is ConfigurableSource)
         put("nsfw", ExtensionLoader.isNsfw(src.id))
+    }
+
+    // ── Login (best-effort) ──────────────────────────────────────────────
+
+    private fun handleLogin(params: JsonObject): JsonElement {
+        val source = requireSource(params)
+        val username = params["username"]?.jsonPrimitive?.contentOrNull
+        System.err.println(
+            "[ExtensionHandler] extension.login called for ${source.name}" +
+                (if (username != null) " (user=$username)" else "")
+        )
+        return buildJsonObject {
+            put("ok", true)
+            put("message", "Login handled by source (no-op bridge stub)")
+        }
     }
 }
