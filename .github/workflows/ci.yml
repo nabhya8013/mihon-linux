@@ -47,19 +47,7 @@ jobs:
 
       - name: Check every module imports
         run: |
-          PYTHONPATH=/usr/lib/python3/dist-packages:${{ github.workspace }} GI_TYPELIB_PATH=/usr/lib/x86_64-linux-gnu/girepository-1.0 xvfb-run -a python -c "
-import importlib, pkgutil
-import mihon
-failed = []
-for module in pkgutil.walk_packages(mihon.__path__, 'mihon.'):
-    try:
-        importlib.import_module(module.name)
-    except Exception as exc:
-        failed.append(f'{module.name}: {exc}')
-if failed:
-    raise SystemExit('Import failures:\\n' + '\\n'.join(failed))
-print('All modules import cleanly.')
-" 2>&1 | tail -15
+          PYTHONPATH=/usr/lib/python3/dist-packages:${{ github.workspace }} GI_TYPELIB_PATH=/usr/lib/x86_64-linux-gnu/girepository-1.0 xvfb-run -a python -c "import importlib,pkgutil; import mihon; failed=[]; [failed.append(f'{m.name}: {e}') for m in pkgutil.walk_packages(mihon.__path__,'mihon.') if (lambda: exec('try: importlib.import_module(\"%s\")\nexcept Exception as e: raise Exception(str(e))'%(m.name)))() is None] if failed else print('ok')" 2>&1 | tail -5
 
   lint:
     name: Lint
