@@ -4,7 +4,7 @@ PyGObject>=3.42.0
 androguard>=4.1.2
 # Builds the .tachibk protobuf schema dynamically at import time
 # (core/tachibk_importer.py) - required, not test-only.
-protobuf>=4.21
+protobuf>=4.21,<5.0.0
 # Optional: enables .cbr/.rar in the local source. Still needs an
 # unrar-compatible tool on PATH (unrar, unar, or bsdtar) - the RAR format
 # itself is proprietary and rarfile is only a wrapper around one of those.

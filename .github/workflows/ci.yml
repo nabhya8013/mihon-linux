@@ -36,7 +36,8 @@ jobs:
           python -m pip install --upgrade pip
           pip install pytest
           # Uninstall conflicting system protobuf if present
-          pip uninstall -y protobuf 2>/dev/null || true
+          pip uninstall -y protobuf google protobuf 2>/dev/null || true
+          apt remove -y python3-protobuf 2>/dev/null || true
           # PyGObject comes from apt above; installing it from pip as well
           # would shadow the system typelibs. Comment lines and blanks need
           # stripping by hand too: piping straight into `pip install -r`
@@ -45,7 +46,7 @@ jobs:
           # its own invalid requirement spec and pip refuses the whole batch.
           grep -vE '^(PyGObject|#|\s*$)' requirements.txt > /tmp/ci-requirements.txt
           pip install -r /tmp/ci-requirements.txt
-          pip install --force-reinstall protobuf 2>&1 | tail -5
+          pip install --force-reinstall 'protobuf>=4.21,<5.0.0' 2>&1 | tail -3
 
       - name: Run tests
         # Several tests build real GTK widgets, so they need a display.
