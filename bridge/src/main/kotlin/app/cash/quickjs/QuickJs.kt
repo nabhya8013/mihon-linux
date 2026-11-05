@@ -70,6 +70,8 @@ class QuickJs private constructor() : Closeable {
         unwrap(result)
     }
 
+    fun evaluate(script: String): Any? = evaluate(script, "?")
+
     /** Expose a Java/Kotlin object to scripts as a global. */
     fun set(name: String, type: Class<*>, instance: Any) = withContext { cx, sc ->
         ScriptableObject.putProperty(sc, name, Context.javaToJS(instance, sc))
