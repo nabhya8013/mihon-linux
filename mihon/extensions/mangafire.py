@@ -4,10 +4,13 @@ Uses MangaFire's REST API. Anti-bot challenges (Cloudflare 403/503) are
 handled transparently by the shared HTTP session's WebKit challenge solver.
 """
 
+import logging
 from typing import List, Tuple
 from .base import Extension, apply_source_order
 from ..core.http_client import create_http_session
 from ..core.models import Manga, Chapter, Page, SearchFilter, ExtensionInfo
+
+logger = logging.getLogger("mangafire")
 
 
 API_URL = "https://mangafire.to/api"
@@ -33,13 +36,25 @@ class MangaFireExtension(Extension):
 
     def _get(self, path: str, params: dict = None) -> dict:
         """Make a GET request to the MangaFire API."""
-        url = f"{API_URL}{path}"
+        import requests
+        url = f"{BASE_URL}{path}"
+        headers = {
+            "Accept": "application/json, text/plain, */*",
+            "X-Requested-With": "XMLHttpRequest",
+            "Referer": f"{BASE_URL}/",
+        }
         try:
-            resp = self._session.get(url, params=params, timeout=15)
+            resp = self._session.get(url, params=params, timeout=20, headers=headers)
+            if resp.status_code >= 400 or "json" not in (resp.headers.get("content-type") or "").lower():
+                resp = requests.get(url, params=params, timeout=20, headers=headers)
             resp.raise_for_status()
-            return resp.json()
+            ct = (resp.headers.get("content-type") or "").lower()
+            if "json" in ct:
+                return resp.json()
+            # MangaFire currently serves an app shell for many routes; treat as unavailable.
+            raise RuntimeError(f"MangaFire returned non-JSON response for {path}")
         except Exception as e:
-            print(f"[mangafire] GET {path} error: {e}")
+            logger.error("[mangafire] GET %s error: %s", path, e)
             raise
 
     def _post(self, path: str, data: dict = None) -> dict:
