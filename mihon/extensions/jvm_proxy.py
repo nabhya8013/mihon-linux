@@ -101,7 +101,7 @@ class JvmProxyExtension(Extension):
     def get_manga_details(self, manga: Manga) -> Manga:
         try:
             result = self._call("extension.details", {
-                "mangaUrl": manga.url or manga.source_manga_id,
+                "mangaUrl": self._effective_manga_url(manga),
                 "manga": self._to_bridge_manga(manga),
             })
             updated = self._to_manga(result)
@@ -128,7 +128,7 @@ class JvmProxyExtension(Extension):
     def get_chapters(self, manga: Manga) -> List[Chapter]:
         try:
             result = self._call("extension.chapters", {
-                "mangaUrl": manga.url or manga.source_manga_id,
+                "mangaUrl": self._effective_manga_url(manga),
                 "manga": self._to_bridge_manga(manga),
             }, timeout=60.0)
             chapters = []
@@ -241,6 +241,35 @@ class JvmProxyExtension(Extension):
 
     # ── Converter ─────────────────────────────────────────────────────────
 
+    def _effective_manga_url(self, manga: Manga) -> str:
+        """Best-effort manga URL/path for JVM sources.
+
+        Some sources emit a numeric/internal id in `url` while storing the real
+        site path in `memo` (e.g. Madara-family sources: url='1855',
+        memo.path='/manga/martial-peak/'). Sending the bare id makes the source
+        build a broken request like `https://host1855`. Prefer memo path when
+        the declared URL is not already a usable path/URL.
+        """
+        import json
+
+        url = (manga.url or manga.source_manga_id or "").strip()
+        memo_raw = getattr(manga, "source_memo", "") or ""
+        if memo_raw:
+            try:
+                memo = json.loads(memo_raw) if isinstance(memo_raw, str) else memo_raw
+                path = (memo or {}).get("path") or (memo or {}).get("urlPath") or (memo or {}).get("slug")
+                if isinstance(path, str) and path.strip():
+                    path = path.strip()
+                    looks_bare = bool(url) and url.isdigit()
+                    looks_bare = looks_bare or (
+                        bool(url) and "://" not in url and not url.startswith("/") and "/" not in url
+                    )
+                    if not url or looks_bare:
+                        url = path
+            except (json.JSONDecodeError, TypeError, AttributeError):
+                pass
+        return url
+
     def _to_bridge_manga(self, manga: Manga) -> dict:
         status_map = {
             "ongoing": 1,
@@ -250,7 +279,7 @@ class JvmProxyExtension(Extension):
             "hiatus": 6,
         }
         return {
-            "url": manga.url or manga.source_manga_id,
+            "url": self._effective_manga_url(manga),
             "title": manga.title,
             "artist": manga.artist,
             "author": manga.author,

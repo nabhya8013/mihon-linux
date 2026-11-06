@@ -447,7 +447,18 @@ object ExtensionHandler {
             tryNewApi { runBlocking { http.getMangaUpdate(manga, emptyList(), false, true) }.chapters }
                 ?.let { return it }
         }
-        return runBlocking { source.getChapterList(manga) }
+        return try {
+            runBlocking { source.getChapterList(manga) }
+        } catch (e: AbstractMethodError) {
+            System.err.println("[ExtensionHandler] Chapter API mismatch for ${source::class.qualifiedName}: ${e.message}")
+            emptyList()
+        } catch (e: NoSuchMethodError) {
+            System.err.println("[ExtensionHandler] Chapter API mismatch for ${source::class.qualifiedName}: ${e.message}")
+            emptyList()
+        } catch (e: UnsupportedOperationException) {
+            System.err.println("[ExtensionHandler] Chapter API unsupported for ${source::class.qualifiedName}: ${e.message}")
+            emptyList()
+        }
     }
 
     /**
